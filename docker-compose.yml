@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # ROS Noetic version (Ubuntu 20.04)
+  unitree-l1-ros1:
+    build:
+      context: .
+      dockerfile: Dockerfile.ros1
+    image: unitree-l1-lidar:ros1
+    container_name: unitree_l1_ros1
+    privileged: true
+    network_mode: host
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0  # Adjust based on your device
+    volumes:
+      - ./data:/root/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  # ROS2 Humble version (Ubuntu 22.04) - Following Point-LIO setup
+  unitree-l1-ros2:
+    build:
+      context: .
+      dockerfile: Dockerfile.ros2
+    image: unitree-l1-lidar:ros2-humble
+    container_name: unitree_l1_ros2
+    privileged: true
+    network_mode: host
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0  # Adjust based on your device
+    volumes:
+      - ./data:/root/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+    stdin_open: true
+    tty: true
+    command: /bin/bash

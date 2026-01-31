@@ -55,6 +55,54 @@ graph TD
     D --> C
 ```
 
+## Container Architecture
+
+### Development Environment (Docker)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Docker Host Machine                     │
+│                                                           │
+│  ┌───────────────────┐        ┌───────────────────┐     │
+│  │ LiDAR Container   │        │ MAVROS Container  │     │
+│  ├───────────────────┤        ├───────────────────┤     │
+│  │ Unitree L1        │        │ MAVROS Node       │     │
+│  │ Point-LIO SLAM    │◄──────►│ MAVLink Bridge    │     │
+│  │ Point Cloud Tools │  ROS2  │ PX4 Connection    │     │
+│  └───────────────────┘   DDS  └───────────────────┘     │
+│           │                             │                │
+│           └─────────────┬───────────────┘                │
+│                         │                                │
+│                    Shared ROS2                            │
+│                    Workspace (ws/)                        │
+│                                                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Key Features:**
+- **Network Mode: Host** - Enables ROS2 DDS discovery across containers
+- **Shared Workspace** - Both containers mount `ws/` for custom packages
+- **Independent Operation** - Containers can run separately or together
+- **USB Device Access** - LiDAR on `/dev/ttyUSB*`, Flight controller on `/dev/ttyACM*`
+
+### Production Environment (Raspberry Pi)
+
+For deployment on Raspberry Pi, containers are **not used** to minimize resource overhead:
+
+```
+┌─────────────────────────────────────────────┐
+│         Raspberry Pi (Native ROS2)          │
+├─────────────────────────────────────────────┤
+│  All nodes run natively in single OS        │
+│  - LiDAR drivers                             │
+│  - Point-LIO SLAM                            │
+│  - MAVROS bridge                             │
+│  - Custom control nodes                      │
+└─────────────────────────────────────────────┘
+```
+
+See [Pi Deployment Guide](pi_deployment.md) for installation instructions.
+
 ## TODO
 - [ ] Add detailed component descriptions
 - [ ] Document inter-node communication

@@ -1,6 +1,14 @@
-# COMPLETE BEGINNER'S GUIDE - Unitree L1 LiDAR Setup
+# COMPLETE BEGINNER'S GUIDE - Drone Mapping System Setup
 
-This guide will walk you through everything from scratch, assuming you're new to Docker and ROS.
+This guide will walk you through setting up the LiDAR and MAVROS containers for your drone mapping system, assuming you're new to Docker and ROS.
+
+## 🎯 System Overview
+
+This project uses **two separate Docker containers**:
+- **LiDAR Container**: For Unitree L1 LiDAR and Point-LIO SLAM mapping
+- **MAVROS Container**: For communication with your PX4/ArduPilot flight controller
+
+You can run them independently or together. They communicate via ROS2 topics.
 
 ## 📋 What You'll Need
 
@@ -119,39 +127,51 @@ Press `Ctrl+X`, then `Y`, then `Enter` to save and exit.
 
 ---
 
-## STEP 4: Build the Docker Image
+## STEP 4: Build the Docker Containers
 
-This will download and set up everything you need. It will take 15-30 minutes the first time.
+This will download and set up everything you need.
 
-**Choose ONE of these options:**
+### Build LiDAR Container (for LiDAR SLAM)
 
-### Option A: Interactive Menu (Easiest)
 ```bash
-./start.sh
-```
-
-When the menu appears, press `2` and Enter to build the ROS2 Humble image.
-
-### Option B: Direct Command
-```bash
-docker-compose build unitree-l1-ros2
+./docker-run.sh lidar build
 ```
 
 **What's happening:**
 - Docker is downloading Ubuntu 22.04
 - Installing ROS2 Humble
-- Installing all LiDAR software
+- Installing Unitree L1 LiDAR drivers
+- Installing Point-LIO SLAM
 - Setting everything up automatically
 
-**Go get coffee!** ☕ This takes a while the first time.
+**Go get coffee!** ☕ This takes 10-15 minutes the first time.
+
+### Build MAVROS Container (for flight controller)
+
+```bash
+./docker-run.sh mavros build
+```
+
+**What's happening:**
+- Installing MAVROS for PX4/ArduPilot communication
+- Installing geographic datasets
+- Setting up MAVLink bridge
+
+This takes ~5 minutes.
+
+### Build Both Containers at Once
+
+```bash
+./docker-run.sh all build
+```
 
 When you see "Successfully built" and "Successfully tagged", you're done!
 
 ---
 
-## STEP 5: Run the Container
+## STEP 5: Run the Containers
 
-Now let's start the Docker container with all the software inside.
+Now let's start the Docker containers with all the software inside.
 
 ### Enable Display (for visualization)
 First, allow Docker to show windows on your screen:
@@ -159,17 +179,16 @@ First, allow Docker to show windows on your screen:
 xhost +local:docker
 ```
 
-### Start the Container
+### Start LiDAR Container
 
-**Option A: Using the menu**
 ```bash
-./start.sh
+./docker-run.sh lidar start
 ```
-Press `4` and Enter to run the ROS2 Humble container.
 
-**Option B: Direct command**
+This starts the LiDAR container in the background. Now access it:
+
 ```bash
-docker-compose run --rm unitree-l1-ros2
+./docker-run.sh lidar shell
 ```
 
 **You should now see a prompt like:**
@@ -177,7 +196,33 @@ docker-compose run --rm unitree-l1-ros2
 root@your-computer:/root/ros2_ws#
 ```
 
-🎉 **You're now INSIDE the Docker container!** This is like a virtual computer with all the LiDAR software ready to go.
+🎉 **You're now INSIDE the LiDAR container!** This is like a virtual computer with all the LiDAR software ready to go.
+
+### Start MAVROS Container (Optional)
+
+If you also want to connect to your flight controller:
+
+```bash
+# In a NEW terminal window
+./docker-run.sh mavros start
+./docker-run.sh mavros shell
+```
+
+### Start Both Containers
+
+To run both at once:
+```bash
+./docker-run.sh all start
+```
+
+Then access each in separate terminals:
+```bash
+# Terminal 1 - LiDAR
+./docker-run.sh lidar shell
+
+# Terminal 2 - MAVROS
+./docker-run.sh mavros shell
+```
 
 ---
 

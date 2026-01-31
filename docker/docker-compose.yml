@@ -1,26 +1,49 @@
 version: '3.8'
 
 services:
-  # ROS2 Humble version (Ubuntu 22.04) - Following Point-LIO setup
-  # RECOMMENDED for drone mapping project
-  unitree-l1-ros2:
+  # LiDAR Container: Unitree L1, Point-LIO SLAM, Livox drivers
+  # For LiDAR SLAM and point cloud processing
+  lidar:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/lidar/Dockerfile
     image: unitree-l1-lidar:ros2-humble
-    container_name: unitree_l1_ros2
+    container_name: lidar_container
     privileged: true
-    network_mode: host
+    network_mode: host  # ROS2 DDS communication across containers
     devices:
-      - /dev/ttyUSB0:/dev/ttyUSB0  # Adjust based on your device
+      - /dev/ttyUSB0:/dev/ttyUSB0  # Unitree L1 LiDAR (adjust as needed)
     volumes:
       - ../data:/root/data
-      - ../ws:/root/ros2_ws
+      - ../ws:/root/ros2_ws  # Shared ROS2 workspace
       - ../scripts:/root/scripts
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - DISPLAY=${DISPLAY}
       - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=0  # Ensure same domain for multi-container communication
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  # MAVROS Container: MAVLink bridge to PX4/ArduPilot flight controller
+  # For drone control and telemetry
+  mavros:
+    build:
+      context: ..
+      dockerfile: docker/mavros/Dockerfile
+    image: mavros-px4:ros2-humble
+    container_name: mavros_container
+    privileged: true
+    network_mode: host  # ROS2 DDS communication across containers
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0  # Pixhawk/PX4 USB (adjust as needed)
+    volumes:
+      - ../data:/root/data
+      - ../ws:/root/ros2_ws  # Shared ROS2 workspace
+      - ../scripts:/root/scripts
+    environment:
+      - ROS_DOMAIN_ID=0  # Ensure same domain for multi-container communication
     stdin_open: true
     tty: true
     command: /bin/bash

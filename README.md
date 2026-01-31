@@ -26,18 +26,28 @@ drone-mapping-ros2/
 │
 ├── docs/                        # Documentation
 │   ├── architecture.md          # System architecture overview
+│   ├── lidar_setup.md           # LiDAR container guide
+│   ├── mavros_setup.md          # MAVROS container guide
+│   ├── pi_deployment.md         # Raspberry Pi deployment
 │   ├── ros_graph.md             # ROS 2 nodes and topics
 │   ├── hardware_setup.md        # Hardware assembly guide
 │   └── flight_procedure.md      # Flight operations manual
 │
 ├── docker/                      # Containerization
-│   ├── Dockerfile               # ROS 2 Docker image
-│   └── docker-compose.yml       # Multi-container setup
+│   ├── lidar/
+│   │   └── Dockerfile           # LiDAR container (Unitree L1, Point-LIO)
+│   ├── mavros/
+│   │   └── Dockerfile           # MAVROS container (PX4/ArduPilot)
+│   └── docker-compose.yml       # Multi-container orchestration
 │
 ├── scripts/                     # Helper scripts
-│   ├── build_ws.sh              # Build ROS 2 workspace
-│   ├── source_ws.sh             # Source workspace overlay
-│   └── record_bag.sh            # Record flight data
+│   ├── lidar/                   # LiDAR-specific scripts
+│   ├── mavros/                  # MAVROS-specific scripts
+│   ├── common/                  # Shared scripts
+│   │   ├── build_ws.sh          # Build ROS 2 workspace
+│   │   ├── source_ws.sh         # Source workspace overlay
+│   │   └── record_bag.sh        # Record flight data
+│   └── pi/                      # Raspberry Pi deployment scripts
 │
 ├── ws/                          # ROS 2 workspace
 │   ├── src/
@@ -191,21 +201,46 @@ ros2 topic echo /health/status
 
 ## Docker Support
 
-For containerized development:
+The project uses separate containers for different components, enabling independent development:
+
+### Component Containers
+
+- **LiDAR Container**: Unitree L1 LiDAR, Point-LIO SLAM, point cloud tools
+- **MAVROS Container**: PX4/ArduPilot flight controller communication
+
+### Quick Docker Commands
 
 ```bash
-# Build Docker image
-cd docker
-docker-compose build
+# Build containers
+./docker-run.sh all build          # Build both containers
+./docker-run.sh lidar build        # Build only LiDAR container
+./docker-run.sh mavros build       # Build only MAVROS container
 
-# Run container
-docker-compose up
+# Start containers
+./docker-run.sh all start          # Start both containers
+./docker-run.sh lidar start        # Start only LiDAR container
+./docker-run.sh mavros start       # Start only MAVROS container
 
-# Access container
-docker exec -it drone_mapping bash
+# Access containers
+./docker-run.sh lidar shell        # Shell into LiDAR container
+./docker-run.sh mavros shell       # Shell into MAVROS container
+
+# Stop containers
+./docker-run.sh all stop           # Stop all containers
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for detailed Docker usage.
+### Container Communication
+
+Containers use `network_mode: host` enabling ROS2 DDS topic discovery across containers. Topics from both are visible system-wide:
+
+```bash
+ros2 topic list  # Shows topics from both containers
+```
+
+See detailed guides:
+- [LiDAR Setup Guide](docs/lidar_setup.md)
+- [MAVROS Setup Guide](docs/mavros_setup.md)
+- [QUICKSTART.md](QUICKSTART.md) for step-by-step instructions
 
 ---
 

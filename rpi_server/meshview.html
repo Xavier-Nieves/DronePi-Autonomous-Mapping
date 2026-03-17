@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DronePi Mesh Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0c10;
+    color: #e0e6f0;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  /* ── header bar ── */
+  #header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 48px;
+    background: rgba(10,12,16,0.92);
+    border-bottom: 1px solid #1e2a3a;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+    z-index: 100;
+    backdrop-filter: blur(8px);
+  }
+
+  #header .logo {
+    font-size: 13px;
+    font-weight: bold;
+    color: #4a9eff;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  #header .divider {
+    width: 1px;
+    height: 24px;
+    background: #1e2a3a;
+  }
+
+  #flight-info {
+    font-size: 11px;
+    color: #7a8fa8;
+    flex: 1;
+  }
+
+  #flight-info span {
+    color: #c0cfe0;
+    margin-right: 16px;
+  }
+
+  #status-pill {
+    font-size: 10px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: #1a2030;
+    border: 1px solid #2a3a50;
+    color: #7a8fa8;
+    white-space: nowrap;
+  }
+
+  #status-pill.waiting  { border-color: #2a3a50; color: #4a6a8a; }
+  #status-pill.loading  { border-color: #4a7aaa; color: #4a9eff; }
+  #status-pill.ready    { border-color: #2a6a3a; color: #4adf7a; }
+  #status-pill.error    { border-color: #6a2a2a; color: #df4a4a; }
+
+  /* ── progress bar ── */
+  #progress-wrap {
+    position: fixed;
+    top: 48px; left: 0; right: 0;
+    height: 2px;
+    background: #0e1218;
+    z-index: 99;
+  }
+
+  #progress-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #1a4a8a, #4a9eff);
+    transition: width 0.3s ease;
+  }
+
+  /* ── canvas ── */
+  #canvas-wrap {
+    position: fixed;
+    top: 50px; left: 0; right: 0; bottom: 0;
+  }
+
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* ── waiting overlay ── */
+  #overlay {
+    position: fixed;
+    top: 50px; left: 0; right: 0; bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: #0a0c10;
+    z-index: 50;
+    transition: opacity 0.6s ease;
+  }
+
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+
+  .pulse-ring {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    border: 2px solid #1e3050;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .pulse-ring::after {
+    content: '';
+    position: absolute;
+    width: 100%; height: 100%;
+    border-radius: 50%;
+    border: 2px solid #4a9eff;
+    animation: pulse 2s ease-out infinite;
+  }
+
+  @keyframes pulse {
+    0%   { transform: scale(1);   opacity: 0.8; }
+    100% { transform: scale(1.8); opacity: 0;   }
+  }
+
+  .drone-icon {
+    font-size: 24px;
+    filter: grayscale(0.3);
+  }
+
+  #overlay-title {
+    font-size: 13px;
+    letter-spacing: 3px;
+    color: #4a6a8a;
+    text-transform: uppercase;
+  }
+
+  #overlay-sub {
+    font-size: 10px;
+    color: #2a4a6a;
+    letter-spacing: 1px;
+  }
+
+  /* ── controls hint ── */
+  #controls-hint {
+    position: fixed;
+    bottom: 12px;
+    right: 16px;
+    font-size: 10px;
+    color: #2a4a6a;
+    line-height: 1.8;
+    text-align: right;
+    z-index: 100;
+  }
+
+  /* ── stats panel ── */
+  #stats-panel {
+    position: fixed;
+    bottom: 12px;
+    left: 16px;
+    font-size: 10px;
+    color: #3a5a7a;
+    line-height: 1.8;
+    z-index: 100;
+  }
+
+  #stats-panel span { color: #5a8aaa; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <div class="logo">&#9670; DronePi</div>
+  <div class="divider"></div>
+  <div id="flight-info">
+    <span id="info-flight">—</span>
+    <span id="info-points">—</span>
+    <span id="info-time">—</span>
+  </div>
+  <div id="status-pill" class="waiting">WAITING FOR OUTPUT</div>
+</div>
+
+<!-- Progress -->
+<div id="progress-wrap"><div id="progress-bar"></div></div>
+
+<!-- Three.js canvas -->
+<div id="canvas-wrap"><canvas id="canvas"></canvas></div>
+
+<!-- Waiting overlay -->
+<div id="overlay">
+  <div class="pulse-ring"><div class="drone-icon">&#128641;</div></div>
+  <div id="overlay-title">Waiting for output</div>
+  <div id="overlay-sub">Polling every 10s — mesh will load automatically after flight</div>
+</div>
+
+<!-- Controls hint -->
+<div id="controls-hint">
+  Left drag — orbit<br>
+  Right drag — pan<br>
+  Scroll — zoom
+</div>
+
+<!-- Stats -->
+<div id="stats-panel">
+  Vertices: <span id="stat-verts">—</span><br>
+  Faces: <span id="stat-faces">—</span><br>
+  Render: <span id="stat-fps">—</span> fps
+</div>
+
+<!-- Three.js r128 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+// ── config ────────────────────────────────────────────────────────────────────
+const POLL_INTERVAL_MS = 10000;  // 10 seconds
+
+// Detect Pi IP from URL or default to hotspot IP
+const params   = new URLSearchParams(window.location.search);
+const BASE_URL = params.get('host')
+  ? `http://${params.get('host')}`
+  : `http://${window.location.host}`;
+
+// ── Three.js setup ────────────────────────────────────────────────────────────
+const canvas   = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x0a0c10);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
+camera.position.set(0, -8, 5);
+camera.lookAt(0, 0, 0);
+
+// Lighting
+const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(5, 10, 8);
+scene.add(sun);
+
+// Grid helper (visible while waiting)
+const grid = new THREE.GridHelper(20, 20, 0x1a2a3a, 0x121820);
+scene.add(grid);
+
+// ── orbit controls (manual implementation — no OrbitControls import needed) ──
+let isDragging  = false;
+let isRightDrag = false;
+let lastX = 0, lastY = 0;
+let theta = 0, phi = Math.PI / 4, radius = 12;
+let panX = 0, panY = 0;
+
+function updateCamera() {
+  const x = radius * Math.sin(phi) * Math.sin(theta) + panX;
+  const y = radius * Math.cos(phi) + panY;
+  const z = radius * Math.sin(phi) * Math.cos(theta);
+  camera.position.set(x, y, z);
+  camera.lookAt(panX, panY, 0);
+}
+updateCamera();
+
+canvas.addEventListener('mousedown', e => {
+  isDragging  = true;
+  isRightDrag = e.button === 2;
+  lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener('mouseup',   () => isDragging = false);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  if (isRightDrag) {
+    // Pan
+    panX -= dx * 0.01;
+    panY += dy * 0.01;
+  } else {
+    // Orbit
+    theta -= dx * 0.005;
+    phi    = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.005));
+  }
+  updateCamera();
+});
+
+canvas.addEventListener('wheel', e => {
+  radius = Math.max(0.5, Math.min(200, radius + e.deltaY * 0.02));
+  updateCamera();
+}, { passive: true });
+
+// ── resize handler ────────────────────────────────────────────────────────────
+function onResize() {
+  const wrap = document.getElementById('canvas-wrap');
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', onResize);
+onResize();
+
+// ── render loop ───────────────────────────────────────────────────────────────
+let frameCount = 0, lastFpsTime = performance.now();
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime > 1000) {
+    document.getElementById('stat-fps').textContent = frameCount;
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+}
+animate();
+
+// ── PLY parser ────────────────────────────────────────────────────────────────
+// Fully header-driven: reads property types from the PLY header and computes
+// byte offsets dynamically. Handles float/double XYZ, uchar colors, alpha,
+// normals, and extra scalar fields (e.g. pymeshlab quality).
+
+function plyTypeSize(type) {
+  const sizes = { char:1, uchar:1, short:2, ushort:2, int:4, uint:4,
+                  float:4, float32:4, double:8, float64:8 };
+  return sizes[type] || 4;
+}
+
+function plyTypeReader(view, type, offset, le) {
+  switch(type) {
+    case 'float': case 'float32': return view.getFloat32(offset, le);
+    case 'double': case 'float64': return view.getFloat64(offset, le);
+    case 'int':   case 'int32':   return view.getInt32(offset, le);
+    case 'uint':  case 'uint32':  return view.getUint32(offset, le);
+    case 'short': case 'int16':   return view.getInt16(offset, le);
+    case 'ushort':case 'uint16':  return view.getUint16(offset, le);
+    case 'char':  case 'int8':    return view.getInt8(offset);
+    case 'uchar': case 'uint8':   return view.getUint8(offset);
+    default:                       return view.getFloat32(offset, le);
+  }
+}
+
+function parsePLY(buffer) {
+  // ── parse header ──────────────────────────────────────────────────────────
+  const headerBytes = new Uint8Array(buffer, 0, Math.min(4096, buffer.byteLength));
+  const headerText  = new TextDecoder().decode(headerBytes);
+  const lines       = headerText.split('\n');
+
+  let nVerts = 0, nFaces = 0;
+  let isBinary = false, isBigEndian = false;
+  let headerEnd = 0;
+  let inVertex  = false;
+  let props     = [];   // [{name, type, size}]
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (l === 'format binary_little_endian 1.0') { isBinary = true; }
+    if (l === 'format binary_big_endian 1.0')    { isBinary = true; isBigEndian = true; }
+    if (l.startsWith('element vertex'))  { nVerts = parseInt(l.split(' ')[2]); inVertex = true; }
+    if (l.startsWith('element face'))    { nFaces = parseInt(l.split(' ')[2]); inVertex = false; }
+    if (l.startsWith('property') && inVertex && !l.startsWith('property list')) {
+      const parts = l.split(' ');
+      const type  = parts[1];
+      const name  = parts[2];
+      props.push({ name, type, size: plyTypeSize(type) });
+    }
+    if (l === 'end_header') {
+      const enc = new TextEncoder();
+      let off = 0;
+      for (let j = 0; j <= i; j++) off += enc.encode(lines[j] + '\n').length;
+      headerEnd = off;
+      break;
+    }
+  }
+
+  // ── compute per-property byte offsets within a vertex ─────────────────────
+  let byteOffset = 0;
+  for (const p of props) { p.offset = byteOffset; byteOffset += p.size; }
+  const stride = byteOffset;
+
+  // ── identify key properties ───────────────────────────────────────────────
+  const pMap    = Object.fromEntries(props.map(p => [p.name, p]));
+  const hasColor = 'red' in pMap;
+  const xProp = pMap['x'], yProp = pMap['y'], zProp = pMap['z'];
+
+  const positions = new Float32Array(nVerts * 3);
+  const colors    = hasColor ? new Float32Array(nVerts * 3) : null;
+
+  if (isBinary) {
+    const view = new DataView(buffer, headerEnd);
+    const le   = !isBigEndian;
+    for (let i = 0; i < nVerts; i++) {
+      const base = i * stride;
+      positions[i*3]   = plyTypeReader(view, xProp.type, base + xProp.offset, le);
+      positions[i*3+1] = plyTypeReader(view, yProp.type, base + yProp.offset, le);
+      positions[i*3+2] = plyTypeReader(view, zProp.type, base + zProp.offset, le);
+      if (hasColor && colors) {
+        colors[i*3]   = view.getUint8(base + pMap['red'].offset)   / 255;
+        colors[i*3+1] = view.getUint8(base + pMap['green'].offset) / 255;
+        colors[i*3+2] = view.getUint8(base + pMap['blue'].offset)  / 255;
+      }
+    }
+  } else {
+    // ASCII fallback
+    const bodyText  = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
+    const bodyLines = bodyText.split('\n');
+    const xIdx = props.findIndex(p => p.name === 'x');
+    const yIdx = props.findIndex(p => p.name === 'y');
+    const zIdx = props.findIndex(p => p.name === 'z');
+    const rIdx = props.findIndex(p => p.name === 'red');
+    const gIdx = props.findIndex(p => p.name === 'green');
+    const bIdx = props.findIndex(p => p.name === 'blue');
+    for (let i = 0; i < nVerts; i++) {
+      const parts = bodyLines[i].trim().split(/\s+/);
+      positions[i*3]   = parseFloat(parts[xIdx]);
+      positions[i*3+1] = parseFloat(parts[yIdx]);
+      positions[i*3+2] = parseFloat(parts[zIdx]);
+      if (hasColor && colors && rIdx >= 0) {
+        colors[i*3]   = parseInt(parts[rIdx]) / 255;
+        colors[i*3+1] = parseInt(parts[gIdx]) / 255;
+        colors[i*3+2] = parseInt(parts[bIdx]) / 255;
+      }
+    }
+  }
+
+  return { positions, colors, nVerts, nFaces };
+}
+
+// ── mesh loader ───────────────────────────────────────────────────────────────
+let currentMesh = null;
+
+async function loadMesh(filename) {
+  setStatus('loading', 'LOADING...');
+  setProgress(5);
+
+  const url = `${BASE_URL}/${filename}`;
+  let buffer;
+
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const total  = parseInt(resp.headers.get('content-length') || '0');
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total > 0) setProgress(5 + 70 * (received / total));
+    }
+
+    const merged = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+    buffer = merged.buffer;
+  } catch (e) {
+    setStatus('error', 'LOAD ERROR');
+    console.error('PLY fetch failed:', e);
+    return;
+  }
+
+  setProgress(80);
+  const { positions, colors, nVerts, nFaces } = parsePLY(buffer);
+  setProgress(95);
+
+  // Remove old mesh
+  if (currentMesh) { scene.remove(currentMesh); currentMesh.geometry.dispose(); }
+  grid.visible = false;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  if (colors) {
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  }
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshLambertMaterial({
+    vertexColors: !!colors,
+    color: colors ? 0xffffff : 0x4a9eff,
+    side: THREE.DoubleSide,
+  });
+
+  currentMesh = new THREE.Mesh(geo, mat);
+  scene.add(currentMesh);
+
+  // Auto-frame
+  geo.computeBoundingSphere();
+  const { center, radius: r } = geo.boundingSphere;
+  camera.position.set(center.x, center.y - r * 2.5, center.z + r * 1.2);
+  camera.lookAt(center);
+  panX = center.x; panY = center.y;
+  radius = r * 2.5;
+  updateCamera();
+
+  document.getElementById('stat-verts').textContent = nVerts.toLocaleString();
+  document.getElementById('stat-faces').textContent = nFaces.toLocaleString();
+
+  setProgress(100);
+  setTimeout(() => setProgress(0), 800);
+  setStatus('ready', 'READY');
+  document.getElementById('overlay').classList.add('hidden');
+}
+
+// ── manifest poller ───────────────────────────────────────────────────────────
+let lastFilename = null;
+
+async function pollManifest() {
+  try {
+    const resp = await fetch(`${BASE_URL}/latest.json`, { cache: 'no-store' });
+    if (!resp.ok) return;  // 404 = no flight yet, keep waiting silently
+
+    const data = await resp.json();
+    const { filename, flight_name, timestamp, point_count } = data;
+
+    // Update header info
+    document.getElementById('info-flight').textContent = flight_name || filename;
+    document.getElementById('info-points').textContent = point_count
+      ? `${parseInt(point_count).toLocaleString()} pts` : '';
+    document.getElementById('info-time').textContent   = timestamp || '';
+
+    // Load mesh if it's new
+    if (filename && filename !== lastFilename) {
+      lastFilename = filename;
+      await loadMesh(filename);
+    }
+  } catch (e) {
+    // Network error — Pi may still be processing, stay silent
+  }
+}
+
+// ── status helpers ────────────────────────────────────────────────────────────
+function setStatus(cls, text) {
+  const el = document.getElementById('status-pill');
+  el.className = `${cls}`;
+  el.textContent = text;
+}
+
+function setProgress(pct) {
+  document.getElementById('progress-bar').style.width = `${pct}%`;
+}
+
+// ── boot ──────────────────────────────────────────────────────────────────────
+pollManifest();
+setInterval(pollManifest, POLL_INTERVAL_MS);
+</script>
+</body>
+</html>

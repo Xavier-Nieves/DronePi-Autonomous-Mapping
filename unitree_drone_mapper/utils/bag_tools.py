@@ -58,7 +58,7 @@ def read_pointclouds_from_bag(
                 points.append(list(point))
 
             if points:
-                clouds.append(np.array(points, dtype=np.float32))
+                clouds.append(np.array(points, dtype=np.float64))
                 msg_count += 1
 
                 if msg_count % 50 == 0:
@@ -118,7 +118,7 @@ def read_trajectory_from_bag(
 def merge_clouds(clouds: List[np.ndarray]) -> np.ndarray:
     """Merge a list of point cloud arrays into a single array."""
     if not clouds:
-        return np.empty((0, 3), dtype=np.float32)
+        return np.empty((0, 3), dtype=np.float64)
     return np.vstack(clouds)
 
 

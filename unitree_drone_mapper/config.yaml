@@ -21,16 +21,22 @@ imu:
   source: lidar_internal  # L1 has built-in IMU
 
 camera:
-  model: insta360_x3
-  wifi_ssid: Insta360_X3_XXXX
-  capture_interval_m: 2.0  # meters between captures
-  resolution: [5760, 2880]  # equirectangular
-  video_device: /dev/video0
-  jpeg_quality: 95
+  model: imx219                  # Raspberry Pi Camera Module v2 (Sony IMX219)
+  type: perspective              # Pinhole camera — NOT equirectangular
+  video_device: /dev/video0      # CSI camera via V4L2 (Pi 5 with libcamera-v4l2)
+  capture_interval_s: 10.0      # Seconds between texture captures
+  resolution: [1920, 1080]       # Capture resolution (set in test with --width/--height)
+  jpeg_quality: 90
+  # Approximate intrinsics for IMX219 at 1920x1080 (calibrate for accuracy)
+  # Run: python3 -m utils.calibrate_camera to get exact values
+  fx: 1043.0
+  fy: 1043.0
+  cx: 960.0
+  cy: 540.0
 
 px4:
-  connection: /dev/ttyACM0:921600
-  dds_port: 8888
+  connection: /dev/ttyACM0      # USB serial — MAVLink only (no DDS for now)
+  baud: 921600
 
 # Flight
 flight:

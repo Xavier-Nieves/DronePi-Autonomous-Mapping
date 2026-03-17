@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/home/dronepi/open3d_env/bin/python3
 """Test post-processing pipeline on sample data.
 
 Run: python3 -m tests.test_processing

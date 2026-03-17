@@ -1,0 +1,254 @@
+[
+  {
+    "index": 0,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0000.jpg",
+    "pose": {
+      "timestamp": 1772164979.8139012,
+      "position": [
+        -0.003682238572367535,
+        -0.008012704796642704,
+        -0.005179952724067409
+      ],
+      "orientation": [
+        0.9970839999143314,
+        0.0018392448204178537,
+        -0.04165752677398602,
+        0.0639121643837614
+      ]
+    }
+  },
+  {
+    "index": 1,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0001.jpg",
+    "pose": {
+      "timestamp": 1772164985.0512676,
+      "position": [
+        -0.01799976405569715,
+        -0.005440591483217742,
+        -0.008812387087818207
+      ],
+      "orientation": [
+        0.9958601015400953,
+        0.07929564893249254,
+        -0.009483075424059325,
+        0.0434157747952605
+      ]
+    }
+  },
+  {
+    "index": 2,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0002.jpg",
+    "pose": {
+      "timestamp": 1772164989.1825452,
+      "position": [
+        0.051387537188519246,
+        -0.013708339693847292,
+        0.008207583773937798
+      ],
+      "orientation": [
+        0.9102204017874986,
+        0.09144949808053582,
+        0.3005831642577373,
+        0.26978801091780924
+      ]
+    }
+  },
+  {
+    "index": 3,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0003.jpg",
+    "pose": {
+      "timestamp": 1772164992.856127,
+      "position": [
+        0.03481955748867544,
+        -0.026150074046155908,
+        0.02821087189032611
+      ],
+      "orientation": [
+        0.9159029219478904,
+        0.08607653047878346,
+        0.31557253203256486,
+        0.23265133890455306
+      ]
+    }
+  },
+  {
+    "index": 4,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0004.jpg",
+    "pose": {
+      "timestamp": 1772164998.2378356,
+      "position": [
+        0.20716900966669588,
+        -0.062140913294345755,
+        -0.12150883942684038
+      ],
+      "orientation": [
+        0.6526250231689711,
+        0.549258531527598,
+        0.4741930956030297,
+        0.21802878883218074
+      ]
+    }
+  },
+  {
+    "index": 5,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0005.jpg",
+    "pose": {
+      "timestamp": 1772165001.6205418,
+      "position": [
+        0.16810710424399966,
+        -0.019399900210014635,
+        -0.15909351686785103
+      ],
+      "orientation": [
+        0.663206186680494,
+        0.5704857579874865,
+        0.44071131089666404,
+        0.20118920032944324
+      ]
+    }
+  },
+  {
+    "index": 6,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0006.jpg",
+    "pose": {
+      "timestamp": 1772165006.9802103,
+      "position": [
+        0.057864908008379436,
+        -0.023648339502104244,
+        0.018273907440400985
+      ],
+      "orientation": [
+        0.9941955496785211,
+        0.007563343724177114,
+        0.07998828576623274,
+        0.07155332955539671
+      ]
+    }
+  },
+  {
+    "index": 7,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0007.jpg",
+    "pose": {
+      "timestamp": 1772165013.989219,
+      "position": [
+        -0.2346738142127592,
+        -0.07224875398713115,
+        -0.015743164263047425
+      ],
+      "orientation": [
+        0.9932162279455575,
+        -0.02367740969666433,
+        -0.08199942421370025,
+        0.07897467469573166
+      ]
+    }
+  },
+  {
+    "index": 8,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0008.jpg",
+    "pose": {
+      "timestamp": 1772165019.8728926,
+      "position": [
+        -0.28486138051713783,
+        -0.08443478145173958,
+        -0.004379001426376718
+      ],
+      "orientation": [
+        0.9975013841945148,
+        -0.012587845198224505,
+        -0.059821412399207484,
+        0.03541092064259578
+      ]
+    }
+  },
+  {
+    "index": 9,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0009.jpg",
+    "pose": {
+      "timestamp": 1772165024.5384703,
+      "position": [
+        -0.046011898384297874,
+        -0.05296818763423217,
+        -0.012002414880205524
+      ],
+      "orientation": [
+        0.9972042670948674,
+        -0.02358296018583913,
+        -0.0608691015948744,
+        0.03636545265105223
+      ]
+    }
+  },
+  {
+    "index": 10,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0010.jpg",
+    "pose": {
+      "timestamp": 1772165029.4663444,
+      "position": [
+        5.085494853723527,
+        -0.16535125764460126,
+        -2.5965721495398255
+      ],
+      "orientation": [
+        0.9763335172935602,
+        0.03956194321356148,
+        0.21103460532317425,
+        -0.02592510391852433
+      ]
+    }
+  },
+  {
+    "index": 11,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0011.jpg",
+    "pose": {
+      "timestamp": 1772165036.2720842,
+      "position": [
+        32.55726973284229,
+        -26.369449899448725,
+        -15.886473219768211
+      ],
+      "orientation": [
+        0.9594471273401013,
+        0.12590090706683063,
+        0.10683388765218467,
+        -0.2284659534508326
+      ]
+    }
+  },
+  {
+    "index": 12,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0012.jpg",
+    "pose": {
+      "timestamp": 1772165041.2294257,
+      "position": [
+        42.082002086421234,
+        -30.646841115479923,
+        -19.628264335061516
+      ],
+      "orientation": [
+        0.9257312023038978,
+        -0.07529137218267819,
+        -0.22011293373734522,
+        -0.29816647490238257
+      ]
+    }
+  },
+  {
+    "index": 13,
+    "path": "/home/dronepi/unitree_lidar_project/unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0013.jpg",
+    "pose": {
+      "timestamp": 1772165045.1390262,
+      "position": [
+        32.300444978840176,
+        -26.427572372550063,
+        -23.73418758803581
+      ],
+      "orientation": [
+        0.8398244368131751,
+        -0.015346555647461972,
+        -0.1642201776068074,
+        -0.5171954483811826
+      ]
+    }
+  }
+]

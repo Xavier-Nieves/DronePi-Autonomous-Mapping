@@ -56,6 +56,23 @@
     margin-right: 16px;
   }
 
+  /* ── header buttons ── */
+  .header-btn {
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    padding: 5px 12px;
+    background: transparent;
+    border: 1px solid #2a3a50;
+    color: #4a6a8a;
+    cursor: pointer;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .header-btn:hover { border-color: #4a9eff; color: #4a9eff; }
+  .header-btn.active { border-color: #4a9eff; color: #4a9eff; background: rgba(74,158,255,0.08); }
+
   #status-pill {
     font-size: 10px;
     padding: 3px 10px;
@@ -66,10 +83,10 @@
     white-space: nowrap;
   }
 
-  #status-pill.waiting  { border-color: #2a3a50; color: #4a6a8a; }
-  #status-pill.loading  { border-color: #4a7aaa; color: #4a9eff; }
-  #status-pill.ready    { border-color: #2a6a3a; color: #4adf7a; }
-  #status-pill.error    { border-color: #6a2a2a; color: #df4a4a; }
+  #status-pill.waiting { border-color: #2a3a50; color: #4a6a8a; }
+  #status-pill.loading { border-color: #4a7aaa; color: #4a9eff; }
+  #status-pill.ready   { border-color: #2a6a3a; color: #4adf7a; }
+  #status-pill.error   { border-color: #6a2a2a; color: #df4a4a; }
 
   /* ── progress bar ── */
   #progress-wrap {
@@ -91,6 +108,7 @@
   #canvas-wrap {
     position: fixed;
     top: 50px; left: 0; right: 0; bottom: 0;
+    transition: right 0.3s ease;
   }
 
   canvas { display: block; width: 100%; height: 100%; }
@@ -135,10 +153,7 @@
     100% { transform: scale(1.8); opacity: 0;   }
   }
 
-  .drone-icon {
-    font-size: 24px;
-    filter: grayscale(0.3);
-  }
+  .drone-icon { font-size: 24px; filter: grayscale(0.3); }
 
   #overlay-title {
     font-size: 13px;
@@ -153,6 +168,149 @@
     letter-spacing: 1px;
   }
 
+  /* ── view cube ── */
+  /*
+   * Pure CSS 3D cube rendered as a fixed overlay in the top-right corner.
+   * The cube is a perspective div containing six absolutely-positioned faces.
+   * Each face is a clickable button that snaps the camera to a preset view.
+   * The cube CSS transform is updated on every updateCamera() call to mirror
+   * the current orbit state -- it always shows where you are looking from.
+   * Implemented as a DOM overlay, not inside the WebGL canvas, so it has
+   * zero impact on renderer FPS.
+   */
+  #view-cube-wrap {
+    position: fixed;
+    top: 66px;
+    right: 16px;
+    width: 60px;
+    height: 76px;
+    z-index: 100;
+    perspective: 200px;
+    transition: right 0.3s ease;
+  }
+
+  body.sidebar-open #view-cube-wrap { right: 376px; }
+
+  #view-cube {
+    width: 60px;
+    height: 60px;
+    position: relative;
+    transform-style: preserve-3d;
+  }
+
+  .vc-face {
+    position: absolute;
+    width: 60px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: 1px solid rgba(74,158,255,0.25);
+    background: rgba(10,18,30,0.72);
+    color: #4a7aaa;
+    backdrop-filter: blur(4px);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .vc-face:hover {
+    background: rgba(74,158,255,0.18);
+    color: #4a9eff;
+    border-color: rgba(74,158,255,0.7);
+  }
+
+  /* six face transforms -- 40px = half of 80px cube size */
+  .vc-front  { transform: translateZ(30px); }
+  .vc-back   { transform: rotateY(180deg) translateZ(30px); }
+  .vc-right  { transform: rotateY( 90deg) translateZ(30px); }
+  .vc-left   { transform: rotateY(-90deg) translateZ(30px); }
+  .vc-top    { transform: rotateX( 90deg) translateZ(30px); }
+  .vc-bottom { transform: rotateX(-90deg) translateZ(30px); }
+
+  /* axis lines -- three lines intersecting at the cube center, each passing
+   * through both opposing faces and extending beyond them with an arrowhead
+   * at the positive tip and a label, exactly as in Fusion 360.
+   *
+   * Each axis is a single 100px-wide div (cube = 60px, so 20px overhang
+   * on each side). Centered on the cube via top/left 50% + negative margins.
+   * Rotated into its axis direction via CSS 3D transforms.
+   * The arrowhead is a CSS border triangle on the ::after pseudo-element.
+   * All three are children of #view-cube so syncCube() rotates them freely. */
+
+  .vc-axis {
+    position: absolute;
+    pointer-events: none;
+    /* 100px = 60px cube + 20px overhang each side */
+    width: 100px;
+    height: 2px;
+    top: 50%;
+    left: 50%;
+    margin-top: -1px;
+    margin-left: -50px;
+    transform-style: preserve-3d;
+  }
+  .vc-axis-line {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    border-radius: 1px;
+  }
+  /* arrowhead at positive tip */
+  .vc-axis-line::after {
+    content: '';
+    position: absolute;
+    right: -5px;
+    top: -3px;
+    width: 0; height: 0;
+    border-top:    4px solid transparent;
+    border-bottom: 4px solid transparent;
+  }
+  .vc-axis-label {
+    position: absolute;
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    font-weight: bold;
+    line-height: 1;
+    top: -4px;
+    right: -16px;
+  }
+
+  /* X axis -- red, runs left-right (no rotation needed, default horizontal) */
+  .vc-axis-x                        { transform: translateX(0) translateY(0); }
+  .vc-axis-x .vc-axis-line          { background: #ff4444; }
+  .vc-axis-x .vc-axis-line::after   { border-left: 7px solid #ff4444; }
+  .vc-axis-x .vc-axis-label         { color: #ff4444; }
+
+  /* Y axis -- green, runs front-back (rotated 90deg around Z in the cube plane) */
+  .vc-axis-y                        { transform: rotate(90deg); }
+  .vc-axis-y .vc-axis-line          { background: #44dd44; }
+  .vc-axis-y .vc-axis-line::after   { border-left: 7px solid #44dd44; }
+  .vc-axis-y .vc-axis-label         { color: #44dd44; }
+
+  /* Z axis -- blue, runs top-bottom (rotated into depth via 3D transforms) */
+  .vc-axis-z                        { transform: rotateY(90deg) rotateZ(90deg); }
+  .vc-axis-z .vc-axis-line          { background: #4488ff; }
+  .vc-axis-z .vc-axis-line::after   { border-left: 7px solid #4488ff; }
+  .vc-axis-z .vc-axis-label         { color: #4488ff; }
+
+  #view-cube-axes {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    text-align: center;
+    font-size: 9px;
+    font-family: 'Courier New', monospace;
+    color: #2a4a6a;
+    letter-spacing: 1px;
+    pointer-events: none;
+  }
+
   /* ── controls hint ── */
   #controls-hint {
     position: fixed;
@@ -163,6 +321,7 @@
     line-height: 1.8;
     text-align: right;
     z-index: 100;
+    transition: right 0.3s ease;
   }
 
   /* ── stats panel ── */
@@ -177,6 +336,204 @@
   }
 
   #stats-panel span { color: #5a8aaa; }
+
+  /* ── color mode indicator ── */
+  #color-mode-badge {
+    font-size: 10px;
+    color: #3a6a5a;
+    letter-spacing: 1px;
+  }
+  #color-mode-badge span { color: #4adf9a; }
+
+  /* ═══════════════════════════════════════════════════════
+     FLIGHT DATABASE SIDEBAR
+  ═══════════════════════════════════════════════════════ */
+  #sidebar {
+    position: fixed;
+    top: 50px; right: -360px; bottom: 0;
+    width: 360px;
+    background: rgba(10,12,18,0.97);
+    border-left: 1px solid #1e2a3a;
+    z-index: 90;
+    display: flex;
+    flex-direction: column;
+    transition: right 0.3s ease;
+    backdrop-filter: blur(12px);
+  }
+
+  #sidebar.open { right: 0; }
+
+  /* when sidebar is open, shrink the canvas viewport */
+  body.sidebar-open #canvas-wrap  { right: 360px; }
+  body.sidebar-open #controls-hint { right: 376px; }
+
+  #sidebar-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid #1e2a3a;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  #sidebar-title {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: #4a9eff;
+    text-transform: uppercase;
+  }
+
+  #sidebar-close {
+    background: none;
+    border: none;
+    color: #3a5a7a;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 6px;
+    font-family: 'Courier New', monospace;
+    transition: color 0.2s;
+  }
+  #sidebar-close:hover { color: #df4a4a; }
+
+  /* db stats strip */
+  #db-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    border-bottom: 1px solid #1e2a3a;
+    flex-shrink: 0;
+  }
+
+  .db-stat {
+    padding: 10px 14px;
+    border-right: 1px solid #1e2a3a;
+    text-align: center;
+  }
+  .db-stat:last-child { border-right: none; }
+  .db-stat-label { font-size: 9px; color: #3a5a7a; letter-spacing: 1px; text-transform: uppercase; }
+  .db-stat-val   { font-size: 18px; color: #4a9eff; margin-top: 2px; }
+
+  /* search */
+  #db-search-wrap {
+    padding: 10px 12px;
+    border-bottom: 1px solid #1e2a3a;
+    flex-shrink: 0;
+  }
+
+  #db-search {
+    width: 100%;
+    background: #0e1218;
+    border: 1px solid #1e2a3a;
+    color: #c0cfe0;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 7px 10px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  #db-search:focus    { border-color: #4a9eff; }
+  #db-search::placeholder { color: #2a4a6a; }
+
+  /* flight list */
+  #flight-list {
+    flex: 1;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #1e2a3a transparent;
+  }
+  #flight-list::-webkit-scrollbar       { width: 4px; }
+  #flight-list::-webkit-scrollbar-thumb { background: #1e2a3a; border-radius: 2px; }
+
+  .flight-item {
+    padding: 12px 14px;
+    border-bottom: 1px solid #0e1620;
+    cursor: pointer;
+    transition: background 0.15s;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .flight-item:hover { background: rgba(74,158,255,0.05); }
+  .flight-item.current { background: rgba(74,158,255,0.08); border-left: 2px solid #4a9eff; }
+
+  .fi-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .fi-id    { font-size: 11px; color: #4a9eff; font-weight: bold; }
+  .fi-time  { font-size: 10px; color: #3a5a7a; }
+
+  .fi-meta  { font-size: 10px; color: #4a6a8a; }
+  .fi-meta span { color: #7a9ab8; }
+
+  .fi-chips { display: flex; gap: 5px; margin-top: 2px; }
+  .chip {
+    font-size: 9px; padding: 2px 6px;
+    border: 1px solid #2a3a50; color: #3a5a7a;
+    letter-spacing: 0.5px;
+  }
+  .chip.ply { border-color: rgba(74,158,255,0.4); color: #4a9eff; }
+  .chip.bag { border-color: rgba(74,220,154,0.3); color: #4adf9a; }
+  .chip.pcd { border-color: rgba(255,180,74,0.3); color: #ffb44a; }
+
+  .fi-status {
+    font-size: 9px; padding: 1px 6px;
+    letter-spacing: 0.5px;
+  }
+  .fi-status.ok   { color: #4adf7a; border: 1px solid rgba(74,223,122,0.3); }
+  .fi-status.warn { color: #ffb44a; border: 1px solid rgba(255,180,74,0.3); }
+  .fi-status.fail { color: #df4a4a; border: 1px solid rgba(223,74,74,0.3); }
+
+  .fi-load-btn {
+    margin-top: 4px;
+    align-self: flex-start;
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    background: transparent;
+    border: 1px solid #2a3a50;
+    color: #4a6a8a;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.18s;
+  }
+  .fi-load-btn:hover { border-color: #4a9eff; color: #4a9eff; }
+
+  /* download row */
+  #sidebar-footer {
+    padding: 12px 14px;
+    border-top: 1px solid #1e2a3a;
+    flex-shrink: 0;
+  }
+  #sidebar-footer-title {
+    font-size: 9px; color: #3a5a7a; letter-spacing: 1px;
+    text-transform: uppercase; margin-bottom: 8px;
+  }
+  #dl-btn {
+    width: 100%;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    padding: 8px 0;
+    background: transparent;
+    border: 1px solid #2a3a50;
+    color: #4a6a8a;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.2s;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  #dl-btn:hover   { border-color: #4a9eff; color: #4a9eff; background: rgba(74,158,255,0.06); }
+  #dl-btn:disabled { opacity: 0.3; cursor: default; }
+
+  /* db status note */
+  #db-note {
+    font-size: 9px; color: #2a4a6a;
+    text-align: center; padding: 16px 14px;
+    letter-spacing: 0.5px; line-height: 1.8;
+  }
 </style>
 </head>
 <body>
@@ -190,6 +547,14 @@
     <span id="info-points">—</span>
     <span id="info-time">—</span>
   </div>
+  <div id="color-mode-badge">Color: <span id="color-mode-label">—</span></div>
+  <div class="divider"></div>
+  <button class="header-btn" id="view-cloud-btn" onclick="switchViewMode('cloud')" disabled>&#9632; Cloud</button>
+  <button class="header-btn" id="view-mesh-btn"  onclick="switchViewMode('mesh')"  disabled>&#9650; Mesh</button>
+  <div class="divider"></div>
+  <button class="header-btn" id="dl-header-btn" onclick="downloadCurrentPLY()" disabled title="Download loaded file as PLY">&#8595; PLY</button>
+  <button class="header-btn" id="flights-btn" onclick="toggleSidebar()">Flights &#9776;</button>
+  <div class="divider"></div>
   <div id="status-pill" class="waiting">WAITING FOR OUTPUT</div>
 </div>
 
@@ -213,6 +578,44 @@
   Scroll — zoom
 </div>
 
+<!-- View cube — top-right corner, mirrors current orbit orientation.
+     Axis stubs protrude from the cube faces: X=red, Y=green, Z=blue.
+     Each stub is a child of #view-cube so it rotates with the cube.
+     The stub is a 3D-translated div: line + label positioned at the tip.
+     Cube half-size = 30px. Stubs protrude 20px beyond the face. -->
+<div id="view-cube-wrap">
+  <div id="view-cube">
+
+    <!-- six clickable faces -->
+    <div class="vc-face vc-front"  onclick="snapView('front')">FRONT</div>
+    <div class="vc-face vc-back"   onclick="snapView('back')">BACK</div>
+    <div class="vc-face vc-right"  onclick="snapView('right')">RIGHT</div>
+    <div class="vc-face vc-left"   onclick="snapView('left')">LEFT</div>
+    <div class="vc-face vc-top"    onclick="snapView('top')">TOP</div>
+    <div class="vc-face vc-bottom" onclick="snapView('bottom')">BTM</div>
+
+    <!-- X axis: red, horizontal through cube center, arrow at +X tip -->
+    <div class="vc-axis vc-axis-x">
+      <div class="vc-axis-line"></div>
+      <div class="vc-axis-label">X</div>
+    </div>
+
+    <!-- Y axis: green, front-back through cube center, arrow at +Y tip -->
+    <div class="vc-axis vc-axis-y">
+      <div class="vc-axis-line"></div>
+      <div class="vc-axis-label">Y</div>
+    </div>
+
+    <!-- Z axis: blue, top-bottom through cube center, arrow at +Z tip -->
+    <div class="vc-axis vc-axis-z">
+      <div class="vc-axis-line"></div>
+      <div class="vc-axis-label">Z</div>
+    </div>
+
+  </div>
+  <div id="view-cube-axes"></div>
+</div>
+
 <!-- Stats -->
 <div id="stats-panel">
   Vertices: <span id="stat-verts">—</span><br>
@@ -220,14 +623,53 @@
   Render: <span id="stat-fps">—</span> fps
 </div>
 
+<!-- ═══════════════════════════════════════
+     FLIGHT DATABASE SIDEBAR
+════════════════════════════════════════ -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <div id="sidebar-title">&#9670; Flight Database</div>
+    <button id="sidebar-close" onclick="toggleSidebar()">&#10005;</button>
+  </div>
+
+  <div id="db-stats">
+    <div class="db-stat">
+      <div class="db-stat-label">Flights</div>
+      <div class="db-stat-val" id="db-total">—</div>
+    </div>
+    <div class="db-stat">
+      <div class="db-stat-label">Complete</div>
+      <div class="db-stat-val" id="db-complete" style="color:#4adf7a">—</div>
+    </div>
+    <div class="db-stat">
+      <div class="db-stat-label">SSD Used</div>
+      <div class="db-stat-val" id="db-size" style="font-size:13px;padding-top:4px">—</div>
+    </div>
+  </div>
+
+  <div id="db-search-wrap">
+    <input id="db-search" type="text" placeholder="Search flights…" oninput="filterFlights(this.value)" />
+  </div>
+
+  <div id="flight-list">
+    <div id="db-note">Connecting to Pi flight database…</div>
+  </div>
+
+  <div id="sidebar-footer">
+    <div id="sidebar-footer-title">Current mesh export</div>
+    <button id="dl-btn" onclick="downloadCurrentPLY()" disabled>
+      <span>&#8595;</span> Download current mesh (.ply)
+    </button>
+  </div>
+</div>
+
 <!-- Three.js r128 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
 <script>
 // ── config ────────────────────────────────────────────────────────────────────
-const POLL_INTERVAL_MS = 10000;  // 10 seconds
+const POLL_INTERVAL_MS = 10000;
 
-// Detect Pi IP from URL or default to hotspot IP
 const params   = new URLSearchParams(window.location.search);
 const BASE_URL = params.get('host')
   ? `http://${params.get('host')}`
@@ -244,18 +686,31 @@ const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
 camera.position.set(0, -8, 5);
 camera.lookAt(0, 0, 0);
 
-// Lighting
 const ambient = new THREE.AmbientLight(0xffffff, 0.6);
 scene.add(ambient);
 const sun = new THREE.DirectionalLight(0xffffff, 0.8);
 sun.position.set(5, 10, 8);
 scene.add(sun);
 
-// Grid helper (visible while waiting)
 const grid = new THREE.GridHelper(20, 20, 0x1a2a3a, 0x121820);
 scene.add(grid);
 
-// ── orbit controls (manual implementation — no OrbitControls import needed) ──
+// ── circular point sprite ─────────────────────────────────────────────────────
+// Renders points as soft circular discs instead of squares, matching RViz's
+// point cloud appearance. Built from a canvas — no external texture file needed.
+const _ptCanvas  = document.createElement('canvas');
+_ptCanvas.width  = 64;
+_ptCanvas.height = 64;
+const _ptCtx     = _ptCanvas.getContext('2d');
+const _ptGrad    = _ptCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+_ptGrad.addColorStop(0.0,  'rgba(255,255,255,1.0)');
+_ptGrad.addColorStop(0.5,  'rgba(255,255,255,0.9)');
+_ptGrad.addColorStop(1.0,  'rgba(255,255,255,0.0)');
+_ptCtx.fillStyle = _ptGrad;
+_ptCtx.fillRect(0, 0, 64, 64);
+const pointSprite = new THREE.CanvasTexture(_ptCanvas);
+
+// ── orbit controls ────────────────────────────────────────────────────────────
 let isDragging  = false;
 let isRightDrag = false;
 let lastX = 0, lastY = 0;
@@ -267,16 +722,166 @@ function updateCamera() {
   const y = radius * Math.cos(phi) + panY;
   const z = radius * Math.sin(phi) * Math.cos(theta);
   camera.position.set(x, y, z);
+  // Flip camera.up when phi is in the lower hemisphere (PI to 2*PI).
+  // Without this, passing through the top or bottom pole inverts the
+  // horizontal drag direction -- the scene appears to flip control.
+  // Setting up to (0,-1,0) when upside down keeps controls consistent.
+  if (phi > Math.PI) {
+    camera.up.set(0, -1, 0);
+  } else {
+    camera.up.set(0,  1, 0);
+  }
   camera.lookAt(panX, panY, 0);
+  syncCube();
 }
 updateCamera();
+
+// ── view cube drag ───────────────────────────────────────────────────────────
+// Dragging on the cube orbits the scene, identical to dragging on the canvas.
+// A 3-pixel movement threshold distinguishes a drag from a face-snap click --
+// if the mouse moves less than 3px before mouseup, the click handler on the
+// face div fires normally. If it moves more, the drag is consumed here and
+// the click event is suppressed via a flag checked in snapView().
+
+let cubeDragging    = false;
+let cubeDragMoved   = false;   // true once drag threshold exceeded
+let cubeDragStartX  = 0;
+let cubeDragStartY  = 0;
+const CUBE_DRAG_THRESHOLD = 3;  // pixels
+
+const cubeWrap = document.getElementById('view-cube-wrap');
+
+cubeWrap.addEventListener('mousedown', e => {
+  // Only left button
+  if (e.button !== 0) return;
+  cubeDragging   = true;
+  cubeDragMoved  = false;
+  cubeDragStartX = e.clientX;
+  cubeDragStartY = e.clientY;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  e.stopPropagation();   // prevent canvas mousedown firing simultaneously
+});
+
+window.addEventListener('mousemove', e => {
+  if (!cubeDragging) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX;
+  lastY = e.clientY;
+
+  // Check threshold before committing to drag mode
+  const totalMoved = Math.abs(e.clientX - cubeDragStartX)
+                   + Math.abs(e.clientY - cubeDragStartY);
+  if (!cubeDragMoved && totalMoved < CUBE_DRAG_THRESHOLD) return;
+  cubeDragMoved = true;
+
+  // Same orbit logic as canvas drag -- full 360 vertical, no clamp.
+  // Negate theta when upside down to keep horizontal drag consistent.
+  const cubeUpsideDown = (phi > Math.PI);
+  theta -= dx * 0.005 * (cubeUpsideDown ? -1 : 1);
+  phi   -= dy * 0.005;
+  phi = ((phi % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  updateCamera();
+});
+
+window.addEventListener('mouseup', () => {
+  cubeDragging = false;
+});
+
+// Suppress face snap click if the mouse was dragged
+const _origSnapView = snapView;
+// snapView is defined below -- wrap it after definition via flag check
+
+cubeWrap.addEventListener('click', e => {
+  // If a drag occurred, eat the click so face divs don't fire snapView
+  if (cubeDragMoved) {
+    e.stopPropagation();
+    cubeDragMoved = false;
+  }
+}, true);  // capture phase -- fires before the face onclick
+
+// ── view cube sync ────────────────────────────────────────────────────────────
+// Mirrors the current orbit (theta, phi) onto the CSS 3D cube so it always
+// shows the correct orientation. The cube uses the INVERSE of the camera
+// rotation -- if the camera orbits right, the cube appears to rotate left,
+// exactly as in Fusion 360 and other CAD tools.
+//
+// theta = azimuth angle (horizontal orbit, radians)
+// phi   = polar angle   (vertical orbit, radians, 0=top, PI=bottom)
+//
+// CSS rotateX/rotateY are applied in degrees to #view-cube's transform.
+// No WebGL draw calls involved -- pure DOM style update.
+function syncCube() {
+  const cube = document.getElementById('view-cube');
+  if (!cube) return;
+  // Convert orbit angles to cube rotation.
+  // Negate theta so cube rotates opposite to camera (world-space feel).
+  // phi offset: CSS X-rotation 0deg = front face forward; orbit phi=PI/2
+  // means camera is level, so subtract 90deg to align.
+  const rotX =  (phi   * 180 / Math.PI) - 90;
+  const rotY = -(theta * 180 / Math.PI);
+  cube.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+}
+
+// ── snap to preset view ───────────────────────────────────────────────────────
+// Animates theta and phi to preset values over ~300ms using requestAnimationFrame.
+// Preset angles are defined in radians matching the orbit coordinate system:
+//   theta = 0        -> looking along -Y axis (front face toward camera)
+//   phi   = PI/2     -> camera level (horizon)
+//   phi   = near 0   -> camera above looking down (top view)
+//
+// All presets keep the current radius and pan position so the subject stays
+// in frame. Only viewing angle changes.
+
+// Preset phi values are in [0, 2*PI) to match the wrapped orbit range.
+// phi = PI/2    -> camera level at the horizon
+// phi = 0.05    -> camera almost directly above (top view)
+// phi = PI+0.05 -> camera almost directly below (bottom view, upside-down)
+// Theta 0 = looking along -Y (front). PI/2 = right. -PI/2 = left. PI = back.
+const VIEW_PRESETS = {
+  //          theta              phi
+  front:  [ 0,                  Math.PI / 2          ],
+  back:   [ Math.PI,            Math.PI / 2          ],
+  right:  [ Math.PI / 2,        Math.PI / 2          ],
+  left:   [ -Math.PI / 2,       Math.PI / 2          ],
+  top:    [ 0,                  0.05                 ],
+  bottom: [ 0,                  Math.PI + 0.05       ],  // past PI -> upside down
+};
+
+function snapView(preset) {
+  const target = VIEW_PRESETS[preset];
+  if (!target) return;
+
+  const [targetTheta, targetPhi] = target;
+  const startTheta = theta;
+  const startPhi   = phi;
+  const startTime  = performance.now();
+  const duration   = 300;   // ms
+
+  // Shortest-path interpolation for theta (wrap around -PI/PI boundary)
+  let dTheta = targetTheta - startTheta;
+  while (dTheta >  Math.PI) dTheta -= 2 * Math.PI;
+  while (dTheta < -Math.PI) dTheta += 2 * Math.PI;
+
+  function animStep(now) {
+    const t = Math.min((now - startTime) / duration, 1);
+    // Smooth ease-in-out: t^2 * (3 - 2t)
+    const ease = t * t * (3 - 2 * t);
+    theta = startTheta + dTheta * ease;
+    phi   = startPhi   + (targetPhi - startPhi) * ease;
+    updateCamera();
+    if (t < 1) requestAnimationFrame(animStep);
+  }
+  requestAnimationFrame(animStep);
+}
 
 canvas.addEventListener('mousedown', e => {
   isDragging  = true;
   isRightDrag = e.button === 2;
   lastX = e.clientX; lastY = e.clientY;
 });
-window.addEventListener('mouseup',   () => isDragging = false);
+window.addEventListener('mouseup', () => isDragging = false);
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 window.addEventListener('mousemove', e => {
@@ -285,13 +890,20 @@ window.addEventListener('mousemove', e => {
   const dy = e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
   if (isRightDrag) {
-    // Pan
     panX -= dx * 0.01;
     panY += dy * 0.01;
   } else {
-    // Orbit
-    theta -= dx * 0.005;
-    phi    = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.005));
+    // No phi clamp -- full 360 vertical orbit allowed.
+    // When the camera is in the upside-down hemisphere (phi > PI),
+    // camera.up is (0,-1,0) which flips the perceived left/right direction.
+    // Negating the theta delta when upside down keeps horizontal drag
+    // consistent -- dragging right always rotates right from the user's
+    // perspective regardless of which hemisphere the camera is in.
+    const upsideDown = (phi > Math.PI);
+    theta -= dx * 0.005 * (upsideDown ? -1 : 1);
+    phi   -= dy * 0.005;
+    // Wrap phi into [0, 2*PI) so the upside-down logic stays consistent
+    phi = ((phi % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
   }
   updateCamera();
 });
@@ -312,6 +924,10 @@ function onResize() {
 window.addEventListener('resize', onResize);
 onResize();
 
+// Also resize when sidebar opens/closes
+const sidebarResizeObserver = new ResizeObserver(onResize);
+sidebarResizeObserver.observe(document.getElementById('canvas-wrap'));
+
 // ── render loop ───────────────────────────────────────────────────────────────
 let frameCount = 0, lastFpsTime = performance.now();
 function animate() {
@@ -327,11 +943,60 @@ function animate() {
 }
 animate();
 
-// ── PLY parser ────────────────────────────────────────────────────────────────
-// Fully header-driven: reads property types from the PLY header and computes
-// byte offsets dynamically. Handles float/double XYZ, uchar colors, alpha,
-// normals, and extra scalar fields (e.g. pymeshlab quality).
+// ══════════════════════════════════════════════════════════════════════════════
+// VIRIDIS COLOR RAMP
+// Maps a normalised scalar t ∈ [0,1] → [R,G,B] ∈ [0,1] each.
+// Polynomial approximation of the matplotlib viridis LUT.
+// Used when no vertex color data is present in the PLY (camera offline).
+// ══════════════════════════════════════════════════════════════════════════════
+function viridis(t) {
+  t = Math.max(0.0, Math.min(1.0, t));
+  const r = Math.max(0, Math.min(1,
+      0.2777 + t * (0.1068 + t * (2.2994 + t * (-12.7400 + t * (25.4992 + t * (-18.5145 + t * 4.1130)))))));
+  const g = Math.max(0, Math.min(1,
+      0.0047 + t * (1.2280 + t * (-0.1520 + t * (-0.2434 + t * (-0.5091 + t * (1.5332 + t * -0.8001)))))));
+  const b = Math.max(0, Math.min(1,
+      0.3286 + t * (1.5756 + t * (-6.3437 + t * (14.5045 + t * (-17.6439 + t * (10.5688 + t * -2.3720)))))));
+  return [r, g, b];
+}
 
+// Detect all-white vertex colors — pymeshlab Poisson reconstruction pads
+// geometry-only meshes with RGB (255,255,255). Sample up to 100 vertices;
+// if the mean of all channels is above 0.98 treat as no real color data.
+function isAllWhite(colors, nVerts) {
+  const sampleSize = Math.min(100, nVerts);
+  const step       = Math.max(1, Math.floor(nVerts / sampleSize));
+  let sum = 0, count = 0;
+  for (let i = 0; i < nVerts; i += step) {
+    sum += colors[i*3] + colors[i*3+1] + colors[i*3+2];
+    count += 3;
+  }
+  return (sum / count) > 0.98;
+}
+
+// Apply viridis height-ramp to geometry positions → colors Float32Array.
+// z is remapped from [zMin, zMax] → [0, 1] before lookup.
+function applyViridisHeightRamp(positions, nVerts) {
+  let zMin =  Infinity, zMax = -Infinity;
+  for (let i = 0; i < nVerts; i++) {
+    const z = positions[i * 3 + 2];
+    if (z < zMin) zMin = z;
+    if (z > zMax) zMax = z;
+  }
+  const zRange = zMax - zMin || 1.0;
+
+  const colors = new Float32Array(nVerts * 3);
+  for (let i = 0; i < nVerts; i++) {
+    const t = (positions[i * 3 + 2] - zMin) / zRange;
+    const [r, g, b] = viridis(t);
+    colors[i * 3]     = r;
+    colors[i * 3 + 1] = g;
+    colors[i * 3 + 2] = b;
+  }
+  return colors;
+}
+
+// ── PLY parser ────────────────────────────────────────────────────────────────
 function plyTypeSize(type) {
   const sizes = { char:1, uchar:1, short:2, ushort:2, int:4, uint:4,
                   float:4, float32:4, double:8, float64:8 };
@@ -353,7 +1018,6 @@ function plyTypeReader(view, type, offset, le) {
 }
 
 function parsePLY(buffer) {
-  // ── parse header ──────────────────────────────────────────────────────────
   const headerBytes = new Uint8Array(buffer, 0, Math.min(4096, buffer.byteLength));
   const headerText  = new TextDecoder().decode(headerBytes);
   const lines       = headerText.split('\n');
@@ -362,7 +1026,7 @@ function parsePLY(buffer) {
   let isBinary = false, isBigEndian = false;
   let headerEnd = 0;
   let inVertex  = false;
-  let props     = [];   // [{name, type, size}]
+  let props     = [];
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i].trim();
@@ -372,9 +1036,7 @@ function parsePLY(buffer) {
     if (l.startsWith('element face'))    { nFaces = parseInt(l.split(' ')[2]); inVertex = false; }
     if (l.startsWith('property') && inVertex && !l.startsWith('property list')) {
       const parts = l.split(' ');
-      const type  = parts[1];
-      const name  = parts[2];
-      props.push({ name, type, size: plyTypeSize(type) });
+      props.push({ name: parts[2], type: parts[1], size: plyTypeSize(parts[1]) });
     }
     if (l === 'end_header') {
       const enc = new TextEncoder();
@@ -385,18 +1047,16 @@ function parsePLY(buffer) {
     }
   }
 
-  // ── compute per-property byte offsets within a vertex ─────────────────────
   let byteOffset = 0;
   for (const p of props) { p.offset = byteOffset; byteOffset += p.size; }
   const stride = byteOffset;
 
-  // ── identify key properties ───────────────────────────────────────────────
-  const pMap    = Object.fromEntries(props.map(p => [p.name, p]));
+  const pMap     = Object.fromEntries(props.map(p => [p.name, p]));
   const hasColor = 'red' in pMap;
-  const xProp = pMap['x'], yProp = pMap['y'], zProp = pMap['z'];
+  const xProp    = pMap['x'], yProp = pMap['y'], zProp = pMap['z'];
 
   const positions = new Float32Array(nVerts * 3);
-  const colors    = hasColor ? new Float32Array(nVerts * 3) : null;
+  let colors      = hasColor ? new Float32Array(nVerts * 3) : null;
 
   if (isBinary) {
     const view = new DataView(buffer, headerEnd);
@@ -413,7 +1073,6 @@ function parsePLY(buffer) {
       }
     }
   } else {
-    // ASCII fallback
     const bodyText  = new TextDecoder().decode(new Uint8Array(buffer, headerEnd));
     const bodyLines = bodyText.split('\n');
     const xIdx = props.findIndex(p => p.name === 'x');
@@ -435,11 +1094,12 @@ function parsePLY(buffer) {
     }
   }
 
-  return { positions, colors, nVerts, nFaces };
+  return { positions, colors, nVerts, nFaces, hasColor };
 }
 
 // ── mesh loader ───────────────────────────────────────────────────────────────
-let currentMesh = null;
+let currentMesh   = null;
+let currentBuffer = null;   // retained for PLY download
 
 async function loadMesh(filename) {
   setStatus('loading', 'LOADING...');
@@ -469,6 +1129,7 @@ async function loadMesh(filename) {
     let offset = 0;
     for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
     buffer = merged.buffer;
+    currentBuffer = buffer;   // retain for download
   } catch (e) {
     setStatus('error', 'LOAD ERROR');
     console.error('PLY fetch failed:', e);
@@ -476,27 +1137,55 @@ async function loadMesh(filename) {
   }
 
   setProgress(80);
-  const { positions, colors, nVerts, nFaces } = parsePLY(buffer);
-  setProgress(95);
+  const { positions, colors: plyColors, nVerts, nFaces, hasColor } = parsePLY(buffer);
+  setProgress(90);
 
-  // Remove old mesh
+  // ── color decision ─────────────────────────────────────────────────────────
+  // If the PLY has real vertex colors (camera texture), use them directly.
+  // If not (camera offline / LiDAR-only), generate viridis height ramp.
+  let finalColors;
+  let colorSource;
+  if (hasColor && !isAllWhite(plyColors, nVerts)) {
+    finalColors = plyColors;
+    colorSource = 'CAMERA';
+  } else {
+    // Either no color properties, or all vertices are white (pymeshlab Poisson
+    // padding) — fall through to viridis height ramp either way.
+    finalColors = applyViridisHeightRamp(positions, nVerts);
+    colorSource = 'VIRIDIS·Z';
+  }
+  document.getElementById('color-mode-label').textContent = colorSource;
+
   if (currentMesh) { scene.remove(currentMesh); currentMesh.geometry.dispose(); }
   grid.visible = false;
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  if (colors) {
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(finalColors, 3));
+
+  // ── point cloud vs mesh auto-detect ────────────────────────────────────────
+  // nFaces === 0 means the PLY has no face data (--no-mesh / cloud-only mode).
+  // Render as THREE.Points (like RViz point cloud display).
+  // nFaces > 0 means a full Poisson mesh — render as THREE.Mesh with lighting.
+  if (nFaces === 0) {
+    const mat = new THREE.PointsMaterial({
+      vertexColors: true,
+      size: 0.06,
+      sizeAttenuation: true,
+      map: pointSprite,
+      alphaTest: 0.05,
+      transparent: true,
+    });
+    currentMesh = new THREE.Points(geo, mat);
+    document.getElementById('stat-faces').textContent = 'points only';
+  } else {
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshLambertMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+    });
+    currentMesh = new THREE.Mesh(geo, mat);
   }
-  geo.computeVertexNormals();
-
-  const mat = new THREE.MeshLambertMaterial({
-    vertexColors: !!colors,
-    color: colors ? 0xffffff : 0x4a9eff,
-    side: THREE.DoubleSide,
-  });
-
-  currentMesh = new THREE.Mesh(geo, mat);
   scene.add(currentMesh);
 
   // Auto-frame
@@ -511,43 +1200,104 @@ async function loadMesh(filename) {
   document.getElementById('stat-verts').textContent = nVerts.toLocaleString();
   document.getElementById('stat-faces').textContent = nFaces.toLocaleString();
 
+  // Enable download buttons
+  document.getElementById('dl-btn').disabled        = false;
+  document.getElementById('dl-header-btn').disabled = false;
+
   setProgress(100);
   setTimeout(() => setProgress(0), 800);
   setStatus('ready', 'READY');
   document.getElementById('overlay').classList.add('hidden');
 }
 
-// ── manifest poller ───────────────────────────────────────────────────────────
-let lastFilename = null;
+// ══════════════════════════════════════════════════════════════════════════════
+// PLY DOWNLOAD
+// The buffer is already in memory from the fetch. We pass it directly
+// as a Blob — zero re-encoding, negligible CPU cost.
+// ══════════════════════════════════════════════════════════════════════════════
+function downloadCurrentPLY() {
+  if (!currentBuffer) return;
+  const blob = new Blob([currentBuffer], { type: 'application/octet-stream' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = (lastFilename || 'mesh') ;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
+// ── view mode state ───────────────────────────────────────────────────────────
+// Tracks the two PLY filenames from latest.json and which is active.
+let currentCloudFile = null;   // <session>_cloud.ply
+let currentMeshFile  = null;   // <session>_mesh.ply  (null if --no-mesh)
+let activeViewMode   = 'cloud';
+let lastFilename     = null;   // tracks last loaded session for poll dedup
+
+function switchViewMode(mode) {
+  if (mode === 'cloud' && !currentCloudFile) return;
+  if (mode === 'mesh'  && !currentMeshFile)  return;
+  activeViewMode = mode;
+
+  // Update button states
+  document.getElementById('view-cloud-btn').classList.toggle('active', mode === 'cloud');
+  document.getElementById('view-mesh-btn').classList.toggle('active',  mode === 'mesh');
+
+  const file = mode === 'cloud' ? currentCloudFile : currentMeshFile;
+  loadMesh(file);
+}
+
+// ── manifest poller ───────────────────────────────────────────────────────────
 async function pollManifest() {
   try {
     const resp = await fetch(`${BASE_URL}/latest.json`, { cache: 'no-store' });
-    if (!resp.ok) return;  // 404 = no flight yet, keep waiting silently
+    if (!resp.ok) return;
 
     const data = await resp.json();
-    const { filename, flight_name, timestamp, point_count } = data;
+    const { cloud_ply, mesh_ply, filename, flight_name, timestamp, point_count } = data;
 
     // Update header info
-    document.getElementById('info-flight').textContent = flight_name || filename;
+    document.getElementById('info-flight').textContent = flight_name || filename || '—';
     document.getElementById('info-points').textContent = point_count
       ? `${parseInt(point_count).toLocaleString()} pts` : '';
     document.getElementById('info-time').textContent   = timestamp || '';
 
-    // Load mesh if it's new
-    if (filename && filename !== lastFilename) {
-      lastFilename = filename;
-      await loadMesh(filename);
+    // Resolve filenames — support both new dual-field and legacy single-field schema
+    const cloudFile = cloud_ply || filename || null;
+    const meshFile  = mesh_ply  || null;
+
+    const sessionKey = cloudFile;   // use cloud filename as session identity
+
+    if (sessionKey && sessionKey !== lastFilename) {
+      lastFilename     = sessionKey;
+      currentCloudFile = cloudFile;
+      currentMeshFile  = meshFile;
+
+      // Enable/disable toggle buttons based on what's available
+      document.getElementById('view-cloud-btn').disabled = !cloudFile;
+      document.getElementById('view-mesh-btn').disabled  = !meshFile;
+
+      // Style mesh button dimmed if unavailable
+      document.getElementById('view-mesh-btn').style.opacity = meshFile ? '1' : '0.35';
+      document.getElementById('view-mesh-btn').title = meshFile
+        ? 'Switch to Poisson mesh view'
+        : 'Mesh not available — run postprocess_mesh.py without --no-mesh';
+
+      // Default to cloud view on new session load
+      activeViewMode = 'cloud';
+      document.getElementById('view-cloud-btn').classList.add('active');
+      document.getElementById('view-mesh-btn').classList.remove('active');
+
+      await loadMesh(cloudFile);
     }
   } catch (e) {
-    // Network error — Pi may still be processing, stay silent
+    // stay silent on network errors
   }
 }
 
 // ── status helpers ────────────────────────────────────────────────────────────
 function setStatus(cls, text) {
   const el = document.getElementById('status-pill');
-  el.className = `${cls}`;
+  el.className = cls;
   el.textContent = text;
 }
 
@@ -555,9 +1305,129 @@ function setProgress(pct) {
   document.getElementById('progress-bar').style.width = `${pct}%`;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FLIGHT DATABASE SIDEBAR
+// Polls GET /api/flights on the Pi backend.
+// Falls back gracefully if the endpoint does not exist yet — shows a clear
+// note rather than an error state.
+//
+// Expected /api/flights response schema:
+// {
+//   "flights": [
+//     {
+//       "id":         "FLT-2026-001",
+//       "timestamp":  "2026-03-16 09:14",
+//       "duration":   "08m 42s",
+//       "point_count": 142840,
+//       "status":     "complete",       // "complete" | "partial" | "failed"
+//       "files":      ["ply","bag"],    // any subset of ["ply","pcd","bag"]
+//       "size_mb":    684,
+//       "ply_file":   "flight_001.ply" // filename served under /mnt/ssd/maps/
+//     }
+//   ],
+//   "total_flights":  7,
+//   "complete_count": 5,
+//   "total_size_gb":  "4.8"
+// }
+// ══════════════════════════════════════════════════════════════════════════════
+let allFlights   = [];
+let sidebarOpen  = false;
+
+function toggleSidebar() {
+  sidebarOpen = !sidebarOpen;
+  document.getElementById('sidebar').classList.toggle('open', sidebarOpen);
+  document.body.classList.toggle('sidebar-open', sidebarOpen);
+  document.getElementById('flights-btn').classList.toggle('active', sidebarOpen);
+  // Trigger canvas resize after CSS transition completes
+  setTimeout(onResize, 320);
+  if (sidebarOpen && allFlights.length === 0) fetchFlightDB();
+}
+
+async function fetchFlightDB() {
+  try {
+    const resp = await fetch(`${BASE_URL}/api/flights`, { cache: 'no-store' });
+    if (resp.status === 404) {
+      document.getElementById('db-note').textContent =
+        '/api/flights not yet deployed on Pi — add the endpoint to serve.py to enable the database.';
+      return;
+    }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const data = await resp.json();
+    allFlights = data.flights || [];
+
+    document.getElementById('db-total').textContent    = data.total_flights   ?? allFlights.length;
+    document.getElementById('db-complete').textContent = data.complete_count  ?? '—';
+    document.getElementById('db-size').textContent     = data.total_size_gb
+      ? `${data.total_size_gb} GB` : '—';
+
+    renderFlights(allFlights);
+  } catch (e) {
+    document.getElementById('db-note').textContent =
+      'Could not reach /api/flights. Pi may still be booting or endpoint not yet deployed.';
+    console.warn('Flight DB fetch failed:', e);
+  }
+}
+
+function renderFlights(flights) {
+  const list = document.getElementById('flight-list');
+  if (flights.length === 0) {
+    list.innerHTML = '<div id="db-note">No flights found.</div>';
+    return;
+  }
+
+  list.innerHTML = flights.map(f => {
+    const isCurrent = f.ply_file && f.ply_file === lastFilename;
+    const statusCls = f.status === 'complete' ? 'ok' : f.status === 'partial' ? 'warn' : 'fail';
+    const chips = (f.files || []).map(ext =>
+      `<span class="chip ${ext}">${ext.toUpperCase()}</span>`).join('');
+    const pts = f.point_count ? parseInt(f.point_count).toLocaleString() : '—';
+    const size = f.size_mb ? `${f.size_mb} MB` : '';
+
+    return `
+      <div class="flight-item${isCurrent ? ' current' : ''}" id="fi-${f.id}">
+        <div class="fi-top">
+          <span class="fi-id">${f.id}</span>
+          <span class="fi-status ${statusCls}">${(f.status || '').toUpperCase()}</span>
+        </div>
+        <div class="fi-meta"><span>${f.timestamp || ''}</span> &nbsp;·&nbsp; ${f.duration || ''} &nbsp;·&nbsp; ${pts} pts</div>
+        <div class="fi-chips">${chips}</div>
+        ${f.ply_file ? `<button class="fi-load-btn" onclick="loadFromDB('${f.ply_file}','${f.id}')">Load mesh →</button>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function filterFlights(query) {
+  const q = query.toLowerCase().trim();
+  if (!q) { renderFlights(allFlights); return; }
+  renderFlights(allFlights.filter(f =>
+    (f.id         || '').toLowerCase().includes(q) ||
+    (f.timestamp  || '').toLowerCase().includes(q) ||
+    (f.status     || '').toLowerCase().includes(q)
+  ));
+}
+
+async function loadFromDB(plyFile, flightId) {
+  lastFilename = plyFile;
+  // Update header info from DB record
+  const f = allFlights.find(x => x.id === flightId);
+  if (f) {
+    document.getElementById('info-flight').textContent = f.id;
+    document.getElementById('info-points').textContent = f.point_count
+      ? `${parseInt(f.point_count).toLocaleString()} pts` : '';
+    document.getElementById('info-time').textContent   = f.timestamp || '';
+  }
+  await loadMesh(plyFile);
+  // Highlight current in list
+  document.querySelectorAll('.flight-item').forEach(el => el.classList.remove('current'));
+  const el = document.getElementById(`fi-${flightId}`);
+  if (el) el.classList.add('current');
+}
+
 // ── boot ──────────────────────────────────────────────────────────────────────
 pollManifest();
 setInterval(pollManifest, POLL_INTERVAL_MS);
 </script>
+
 </body>
 </html>

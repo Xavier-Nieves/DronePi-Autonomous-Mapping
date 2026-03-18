@@ -95,3 +95,6 @@ unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0010.
 unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0011.jpg
 unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0012.jpg
 unitree_drone_mapper/data/flights/texture_20260227_000248/raw/images/photo_0013.jpg
+RPI5/ros2_ws/src/point_lio_ros2
+RPI5/ros2_ws/src/unilidar_sdk
+

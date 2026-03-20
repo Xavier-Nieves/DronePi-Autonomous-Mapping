@@ -1,0 +1,20 @@
+DronePi System Check — Log 12
+Date : 19 March 2026
+Time : 22:54:40
+Host : dronepi-desktop
+User : dronepi
+==================================================
+
+RESULTS
+  PASS : 58
+  WARN : 9
+  FAIL : 0
+
+STATUS: READY WITH WARNINGS
+
+SYSTEM SNAPSHOT
+  CPU temp   : 48.3°C
+  Free RAM   : 14631MB
+  SSD free   : 868G (if mounted)
+  Throttled  : throttled=0x0
+  Services   : inactive active active 

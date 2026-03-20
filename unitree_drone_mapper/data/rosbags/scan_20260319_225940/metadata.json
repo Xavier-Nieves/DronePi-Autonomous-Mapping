@@ -1,0 +1,15 @@
+{
+  "id": "scan_20260319_225940",
+  "timestamp": "2026-03-20 02:59",
+  "duration": "02m 33s",
+  "duration_s": 153.0,
+  "point_count": 229500,
+  "face_count": 2010004,
+  "cloud_ply": "scan_20260319_225940_cloud.ply",
+  "mesh_ply": "scan_20260319_225940_mesh.ply",
+  "ply_file": "scan_20260319_225940_mesh.ply",
+  "status": "complete",
+  "cloud_frames": 1493,
+  "ros_distro": "jazzy",
+  "processed_at": "2026-03-19 23:03"
+}

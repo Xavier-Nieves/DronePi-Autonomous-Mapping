@@ -1,56 +1,40 @@
 #!/usr/bin/env python3
-"""drone_watchdog.py — Flight stack supervisor for DronePi.
+"""drone_watchdog.py — Flight stack supervisor with RC toggle and buzzer feedback.
 
-Monitors /mavros/state and manages the Point-LIO SLAM node, SLAM bridge,
-and ROS 2 bag recorder based on the drone's armed and flight mode state.
+FEATURES
+--------
+  1. AUTO MODE: armed + OFFBOARD → auto-start stack
+  2. MANUAL MODE: RC momentary button → toggle stack on/off
+  3. BUZZER FEEDBACK: Pixhawk beeps on start/stop (no external hardware needed)
 
-STATE MACHINE
--------------
-  WAITING
-      Polls /mavros/state every second.
-      Condition to advance: armed=True AND mode=OFFBOARD.
-      When condition met -> launches Point-LIO + SLAM bridge + bag -> ACTIVE.
-
-  ACTIVE
-      Monitors /mavros/state continuously.
-      Condition to revert: armed=False OR mode != OFFBOARD.
-      When condition lost -> stops all processes -> WAITING.
-      A new session starts automatically if the pilot re-arms in OFFBOARD.
-
-SAFETY DESIGN
--------------
-  - This script NEVER arms the drone or switches flight modes.
-    Arming and mode selection are exclusively the pilot's responsibility
-    via the RC transmitter. The watchdog is observe-only on those topics.
-  - Point-LIO is killed with SIGINT (clean shutdown) first, then SIGKILL
-    after a 5-second grace period if it does not exit.
-  - The bag recorder is stopped with SIGINT so the MCAP file is closed
-    correctly. An unclean bag close corrupts the recording.
-  - All state transitions are logged to stdout (captured by journalctl).
-
-SLAM BRIDGE
------------
-  The SLAM bridge (_slam_bridge.py) is launched alongside Point-LIO.
-  It forwards Point-LIO poses to /mavros/vision_pose/pose for EKF fusion.
-  Requires EKF2_EV_CTRL=15 in PX4 parameters.
-
-DEPENDENCIES
+BUZZER TUNES
 ------------
-  rclpy, mavros_msgs (ROS 2 Jazzy)
-  flight_controller module (for clean state subscription)
+  - Stack START: Rising tone (low → high) ♪♪♪
+  - Stack STOP:  Falling tone (high → low) ♪♪♪
+  - Button ACK:  Single short beep ♪
+
+The buzzer is the one built into your Pixhawk 6X. Tunes are sent via
+MAVROS using the PLAY_TUNE_V2 MAVLink message with MML (Music Macro Language).
+
+MML QUICK REFERENCE
+-------------------
+  T<tempo>  - Set tempo (T120 = 120 BPM)
+  L<len>    - Default note length (L8 = eighth note)
+  O<oct>    - Octave (O4 = middle, O5 = high, O3 = low)
+  C D E F G A B - Notes
+  R         - Rest
+  < >       - Octave down/up
+
+RC CHANNEL CONFIGURATION
+------------------------
+  1. Taranis: Assign momentary button (e.g., SH) to channel (e.g., CH7)
+  2. Script: Set RC_TOGGLE_CHANNEL to match (CH7 = index 6)
+  3. Verify in QGC Radio tab
 
 DEPLOYMENT
 ----------
-  Managed by drone-watchdog.service (systemd).
-  See setup_flight_services.sh for installation.
-
-  Manual run (for testing):
-      source /opt/ros/jazzy/setup.bash
-      source ~/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash
-      python3 drone_watchdog.py
-
-  View logs:
-      sudo journalctl -u drone-watchdog -f
+  sudo systemctl restart drone-watchdog
+  sudo journalctl -u drone-watchdog -f
 """
 
 import os
@@ -65,9 +49,33 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from mavros_msgs.msg import State
+from mavros_msgs.msg import State, RCIn, PlayTuneV2
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── RC Toggle Configuration ───────────────────────────────────────────────────
+
+RC_TOGGLE_CHANNEL = 6      # 0-indexed: CH7=6, CH8=7
+RC_HIGH_THRESHOLD = 1700   # Button pressed above this
+RC_LOW_THRESHOLD = 1300    # Button released below this
+RC_DEBOUNCE_MS = 200       # Debounce time
+
+# ── Buzzer Tunes (MML Format) ─────────────────────────────────────────────────
+
+# MML_MODERN format (value 2) for PX4
+TUNE_FORMAT = 2  # MML_MODERN
+
+# Rising tone: Stack starting (excited, ascending)
+TUNE_START = "T180 L16 O4 C E G > C"
+
+# Falling tone: Stack stopping (calming, descending) 
+TUNE_STOP = "T180 L16 O5 C < G E C"
+
+# Single beep: Button acknowledged
+TUNE_ACK = "T200 L32 O5 C"
+
+# Error beep: Something went wrong
+TUNE_ERROR = "T200 L16 O4 C R C R C"
+
+# ── General Configuration ─────────────────────────────────────────────────────
 
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
 WS_SETUP = os.path.expanduser(
@@ -75,28 +83,25 @@ WS_SETUP = os.path.expanduser(
 )
 ROSBAG_DIR = "/mnt/ssd/rosbags"
 
-# Path to scripts (same directory as this file)
 SCRIPT_DIR = Path(__file__).parent
 SLAM_BRIDGE_SCRIPT = SCRIPT_DIR / "_slam_bridge.py"
 POSTFLIGHT_SCRIPT = SCRIPT_DIR / "run_postflight.py"
 
-# Point-LIO launch
 LAUNCH_FILE = os.path.expanduser(
     "~/unitree_lidar_project/RPI5/ros2_ws/src/point_lio_ros2/launch/"
     "combined_lidar_mapping.launch.py"
 )
 
-# Activation mode
-# REQUIRE_OFFBOARD = True  -- field use: armed AND mode=OFFBOARD
-# REQUIRE_OFFBOARD = False -- bench use: armed only
 REQUIRE_OFFBOARD = True
+ENABLE_AUTO_MODE = True
+ENABLE_RC_TOGGLE = True
+ENABLE_BUZZER = True       # Set False to disable buzzer feedback
 
-POLL_HZ = 2           # state poll rate while WAITING
-MONITOR_HZ = 5        # state monitor rate while ACTIVE
-GRACEFUL_KILL_S = 5   # seconds before SIGKILL after SIGINT
-MAVROS_WAIT_S = 15    # seconds to wait for MAVROS on boot
+POLL_HZ = 10
+MONITOR_HZ = 10
+GRACEFUL_KILL_S = 5
+MAVROS_WAIT_S = 15
 
-# Topics recorded in every bag session
 BAG_TOPICS = [
     "/cloud_registered",
     "/aft_mapped_to_init",
@@ -104,13 +109,12 @@ BAG_TOPICS = [
     "/mavros/state",
     "/mavros/local_position/pose",
     "/mavros/global_position/global",
-    "/mavros/vision_pose/pose",  # SLAM bridge output for debugging
+    "/mavros/vision_pose/pose",
 ]
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 def log(msg: str):
-    """Timestamped log line — captured by journalctl."""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
@@ -123,7 +127,6 @@ def log_state(state: str, detail: str = ""):
 # ── Process Management ────────────────────────────────────────────────────────
 
 def start_process(name: str, cmd: str) -> subprocess.Popen:
-    """Launch a shell command in a new process group."""
     log(f"Starting {name}...")
     proc = subprocess.Popen(
         ["bash", "-c", cmd],
@@ -136,17 +139,15 @@ def start_process(name: str, cmd: str) -> subprocess.Popen:
 
 
 def stop_process(name: str, proc: subprocess.Popen):
-    """Stop a process cleanly with SIGINT, then SIGKILL if needed."""
     if proc is None or proc.poll() is not None:
         return
 
-    pgid = None
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
         return
 
-    log(f"Stopping {name} (PID {proc.pid}, PGID {pgid})...")
+    log(f"Stopping {name}...")
 
     try:
         os.killpg(pgid, signal.SIGINT)
@@ -157,19 +158,17 @@ def stop_process(name: str, proc: subprocess.Popen):
         proc.wait(timeout=GRACEFUL_KILL_S)
         log(f"{name} stopped cleanly.")
     except subprocess.TimeoutExpired:
-        log(f"{name} did not exit in {GRACEFUL_KILL_S}s — sending SIGKILL.")
+        log(f"{name} — sending SIGKILL.")
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         proc.wait()
-        log(f"{name} killed.")
 
 
 # ── Command Builders ──────────────────────────────────────────────────────────
 
 def pointlio_cmd() -> str:
-    """Build Point-LIO launch command."""
     return (
         f"source {ROS_SETUP} && "
         f"source {WS_SETUP} && "
@@ -178,7 +177,6 @@ def pointlio_cmd() -> str:
 
 
 def slam_bridge_cmd() -> str:
-    """Build SLAM bridge launch command."""
     return (
         f"source {ROS_SETUP} && "
         f"source {WS_SETUP} && "
@@ -187,7 +185,6 @@ def slam_bridge_cmd() -> str:
 
 
 def bag_record_cmd() -> str:
-    """Build ros2 bag record command for current session."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = f"{ROSBAG_DIR}/scan_{ts}"
     topics = " ".join(BAG_TOPICS)
@@ -198,39 +195,114 @@ def bag_record_cmd() -> str:
     )
 
 
-# ── MAVROS State Reader ───────────────────────────────────────────────────────
+# ── MAVROS Reader with Buzzer ─────────────────────────────────────────────────
 
-class MavrosStateReader:
-    """Lightweight ROS 2 subscriber for /mavros/state."""
+class MavrosReader:
+    """ROS 2 interface for state, RC input, and buzzer output."""
 
     def __init__(self):
         self._armed = False
         self._mode = ""
         self._connected = False
+        self._rc_channels = []
         self._lock = threading.Lock()
+
+        # RC toggle state
+        self._button_was_high = False
+        self._last_toggle_time = 0.0
+        self._toggle_pending = False
 
         rclpy.init()
         self._node = Node("drone_watchdog")
 
-        qos = QoSProfile(
+        # Subscriptions
+        state_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )
 
         self._node.create_subscription(
-            State, "/mavros/state", self._cb, qos)
+            State, "/mavros/state", self._state_cb, state_qos)
+        self._node.create_subscription(
+            RCIn, "/mavros/rc/in", self._rc_cb, sensor_qos)
+
+        # Buzzer publisher
+        self._tune_pub = self._node.create_publisher(
+            PlayTuneV2, "/mavros/play_tune", 10)
 
         self._thread = threading.Thread(
             target=rclpy.spin, args=(self._node,), daemon=True)
         self._thread.start()
-        log("MAVROS state subscriber started.")
 
-    def _cb(self, msg):
+        log("MAVROS interface started")
+        log(f"  RC toggle: CH{RC_TOGGLE_CHANNEL + 1}")
+        log(f"  Buzzer feedback: {'ENABLED' if ENABLE_BUZZER else 'DISABLED'}")
+
+    def _state_cb(self, msg: State):
         with self._lock:
             self._armed = msg.armed
             self._mode = msg.mode
             self._connected = msg.connected
+
+    def _rc_cb(self, msg: RCIn):
+        with self._lock:
+            self._rc_channels = list(msg.channels)
+
+            if len(self._rc_channels) > RC_TOGGLE_CHANNEL:
+                ch_value = self._rc_channels[RC_TOGGLE_CHANNEL]
+                now = time.time()
+
+                button_is_high = ch_value > RC_HIGH_THRESHOLD
+                button_is_low = ch_value < RC_LOW_THRESHOLD
+
+                # Rising edge detection
+                if button_is_high and not self._button_was_high:
+                    if (now - self._last_toggle_time) > (RC_DEBOUNCE_MS / 1000.0):
+                        self._toggle_pending = True
+                        self._last_toggle_time = now
+
+                if button_is_high:
+                    self._button_was_high = True
+                elif button_is_low:
+                    self._button_was_high = False
+
+    # ── Buzzer Control ────────────────────────────────────────────────────────
+
+    def play_tune(self, tune: str):
+        """Play a tune on the Pixhawk buzzer using MML format."""
+        if not ENABLE_BUZZER:
+            return
+
+        msg = PlayTuneV2()
+        msg.format = TUNE_FORMAT  # MML_MODERN = 2
+        msg.tune = tune
+
+        self._tune_pub.publish(msg)
+        log(f"  ♪ Buzzer: {tune[:20]}...")
+
+    def beep_start(self):
+        """Rising tone indicating stack is starting."""
+        self.play_tune(TUNE_START)
+
+    def beep_stop(self):
+        """Falling tone indicating stack is stopping."""
+        self.play_tune(TUNE_STOP)
+
+    def beep_ack(self):
+        """Short beep acknowledging button press."""
+        self.play_tune(TUNE_ACK)
+
+    def beep_error(self):
+        """Error beep pattern."""
+        self.play_tune(TUNE_ERROR)
+
+    # ── State Properties ──────────────────────────────────────────────────────
 
     @property
     def armed(self) -> bool:
@@ -247,13 +319,34 @@ class MavrosStateReader:
         with self._lock:
             return self._connected
 
-    def flight_conditions_met(self) -> bool:
-        """Return True when activation conditions are met."""
+    def get_rc_channel(self, channel: int) -> int:
+        with self._lock:
+            if channel < len(self._rc_channels):
+                return self._rc_channels[channel]
+            return 0
+
+    def check_toggle_pressed(self) -> bool:
+        with self._lock:
+            if self._toggle_pending:
+                self._toggle_pending = False
+                return True
+            return False
+
+    def auto_conditions_met(self) -> bool:
+        if not ENABLE_AUTO_MODE:
+            return False
         with self._lock:
             if REQUIRE_OFFBOARD:
                 return self._armed and self._mode == "OFFBOARD"
             else:
                 return self._armed
+
+    def auto_conditions_lost(self) -> bool:
+        with self._lock:
+            if REQUIRE_OFFBOARD:
+                return not self._armed or self._mode != "OFFBOARD"
+            else:
+                return not self._armed
 
     def shutdown(self):
         self._node.destroy_node()
@@ -261,167 +354,207 @@ class MavrosStateReader:
             rclpy.shutdown()
 
 
-# ── Post-flight Trigger ───────────────────────────────────────────────────────
+# ── Flight Stack Manager ──────────────────────────────────────────────────────
+
+class FlightStack:
+    """Manages Point-LIO, SLAM bridge, and bag recorder."""
+
+    def __init__(self, reader: MavrosReader):
+        self.reader = reader
+        self.pointlio_proc = None
+        self.bridge_proc = None
+        self.bag_proc = None
+        self.is_running = False
+        self.session_count = 0
+        self.activation_mode = None
+
+    def start(self, mode: str):
+        if self.is_running:
+            log("[WARN] Stack already running")
+            return
+
+        self.session_count += 1
+        self.activation_mode = mode
+        log_state("ACTIVATING", f"Session #{self.session_count} ({mode})")
+
+        # Buzzer: rising tone
+        self.reader.beep_start()
+
+        # Start Point-LIO
+        self.pointlio_proc = start_process("Point-LIO", pointlio_cmd())
+        time.sleep(3.0)
+
+        # Start SLAM bridge
+        if SLAM_BRIDGE_SCRIPT.exists():
+            self.bridge_proc = start_process("SLAM bridge", slam_bridge_cmd())
+            time.sleep(1.0)
+
+        # Start bag recorder
+        self.bag_proc = start_process("Bag recorder", bag_record_cmd())
+
+        self.is_running = True
+        log_state("ACTIVE", f"Session #{self.session_count} — scanning")
+
+    def stop(self):
+        if not self.is_running:
+            return
+
+        log_state("DEACTIVATING", f"Session #{self.session_count}")
+
+        # Buzzer: falling tone
+        self.reader.beep_stop()
+
+        # Stop in reverse order
+        stop_process("Bag recorder", self.bag_proc)
+        self.bag_proc = None
+
+        stop_process("SLAM bridge", self.bridge_proc)
+        self.bridge_proc = None
+
+        stop_process("Point-LIO", self.pointlio_proc)
+        self.pointlio_proc = None
+
+        self.is_running = False
+        self.activation_mode = None
+
+        log_state("WAITING", f"Session #{self.session_count} complete")
+
+        # Trigger post-flight
+        trigger_postflight()
+
+    def check_health(self):
+        if self.pointlio_proc and self.pointlio_proc.poll() is not None:
+            log("[WARN] Point-LIO exited unexpectedly")
+            self.pointlio_proc = None
+
+        if self.bridge_proc and self.bridge_proc.poll() is not None:
+            log("[WARN] SLAM bridge exited")
+            self.bridge_proc = None
+
+        if self.bag_proc and self.bag_proc.poll() is not None:
+            log("[WARN] Bag recorder exited")
+            self.bag_proc = None
+
+
+# ── Post-flight ───────────────────────────────────────────────────────────────
 
 def trigger_postflight() -> subprocess.Popen | None:
-    """Launch run_postflight.py in background after session ends."""
     if not POSTFLIGHT_SCRIPT.exists():
-        log(f"[WARN] run_postflight.py not found at {POSTFLIGHT_SCRIPT}")
         return None
 
-    log("Launching post-flight pipeline in background...")
+    log("Launching post-flight processing...")
     try:
-        proc = subprocess.Popen(
+        return subprocess.Popen(
             [sys.executable, str(POSTFLIGHT_SCRIPT), "--auto", "--skip-wait"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        log(f"Post-flight pipeline started (PID {proc.pid})")
-        return proc
     except Exception as e:
-        log(f"[WARN] Could not launch post-flight: {e}")
+        log(f"[WARN] Post-flight failed: {e}")
         return None
 
 
-# ── Main Watchdog Loop ────────────────────────────────────────────────────────
+# ── Main Loop ─────────────────────────────────────────────────────────────────
 
-def wait_for_mavros(reader: MavrosStateReader):
-    """Block until MAVROS reports connected FCU."""
-    log(f"Waiting for MAVROS FCU connection (up to {MAVROS_WAIT_S}s)...")
+def wait_for_mavros(reader: MavrosReader):
+    log(f"Waiting for MAVROS connection (up to {MAVROS_WAIT_S}s)...")
     deadline = time.time() + MAVROS_WAIT_S
     while time.time() < deadline:
         if reader.connected:
             log(f"FCU connected. Mode: {reader.mode}  Armed: {reader.armed}")
+            # Welcome beep
+            reader.beep_ack()
             return
         time.sleep(1.0)
-    log("[WARN] FCU not connected after wait — continuing anyway.")
+    log("[WARN] FCU not connected — continuing anyway")
 
 
 def main():
-    log("=" * 50)
+    log("=" * 55)
     log("DronePi Flight Stack Watchdog")
-    if REQUIRE_OFFBOARD:
-        log("Activation: armed=True AND mode=OFFBOARD (field mode)")
-    else:
-        log("Activation: armed=True only (bench mode)")
-    log("This script never arms or changes flight mode.")
-    log("=" * 50)
+    log("  RC Toggle + Buzzer Feedback")
+    log("=" * 55)
 
-    # Ensure rosbag directory exists
+    if ENABLE_AUTO_MODE:
+        mode_str = "armed + OFFBOARD" if REQUIRE_OFFBOARD else "armed"
+        log(f"  AUTO: {mode_str} → start")
+
+    if ENABLE_RC_TOGGLE:
+        log(f"  MANUAL: CH{RC_TOGGLE_CHANNEL + 1} button → toggle")
+
+    if ENABLE_BUZZER:
+        log("  BUZZER: Pixhawk beeps on start/stop")
+
+    log("=" * 55)
+
     Path(ROSBAG_DIR).mkdir(parents=True, exist_ok=True)
 
-    # Check SLAM bridge exists
-    if not SLAM_BRIDGE_SCRIPT.exists():
-        log(f"[WARN] SLAM bridge not found: {SLAM_BRIDGE_SCRIPT}")
-        log("       Vision pose fusion will not be available.")
-
     try:
-        reader = MavrosStateReader()
+        reader = MavrosReader()
     except Exception as e:
-        log(f"[FAIL] Could not start ROS 2 node: {e}")
+        log(f"[FAIL] ROS 2 init failed: {e}")
         sys.exit(1)
 
     wait_for_mavros(reader)
 
-    pointlio_proc = None
-    bridge_proc = None
-    bag_proc = None
+    stack = FlightStack(reader)
     postflight_proc = None
-    session_count = 0
 
     try:
         while True:
-            # Block new session if post-flight still running
+            # Block during post-flight processing
             if postflight_proc is not None:
                 rc = postflight_proc.poll()
                 if rc is None:
-                    log_state("WAITING",
-                              f"armed={reader.armed}  mode={reader.mode or '?'}  "
-                              f"[POST-PROCESSING]")
                     time.sleep(1.0 / POLL_HZ)
                     continue
-                else:
-                    if rc == 0:
-                        log("Post-flight complete. New session allowed.")
-                    else:
-                        log(f"[WARN] Post-flight exited with code {rc}")
-                    postflight_proc = None
+                postflight_proc = None
 
-            # WAITING state
-            if not reader.flight_conditions_met():
+            # ── WAITING ───────────────────────────────────────────────
+            if not stack.is_running:
+                # Check RC toggle
+                if ENABLE_RC_TOGGLE and reader.check_toggle_pressed():
+                    log("RC button pressed — starting")
+                    reader.beep_ack()
+                    stack.start("MANUAL")
+                    continue
+
+                # Check AUTO
+                if ENABLE_AUTO_MODE and reader.auto_conditions_met():
+                    stack.start("AUTO")
+                    continue
+
+                # Status display
+                ch_val = reader.get_rc_channel(RC_TOGGLE_CHANNEL) if ENABLE_RC_TOGGLE else 0
                 log_state("WAITING",
-                          f"armed={reader.armed}  mode={reader.mode or '?'}")
+                          f"armed={reader.armed}  mode={reader.mode or '?'}  "
+                          f"CH{RC_TOGGLE_CHANNEL+1}={ch_val}")
                 time.sleep(1.0 / POLL_HZ)
                 continue
 
-            # Conditions met — launch flight stack
-            session_count += 1
-            log_state("ACTIVATING",
-                      f"Session #{session_count}  "
-                      f"armed={reader.armed}  mode={reader.mode}")
+            # ── ACTIVE ────────────────────────────────────────────────
+            stack.check_health()
 
-            # Start Point-LIO
-            pointlio_proc = start_process("Point-LIO", pointlio_cmd())
-            time.sleep(3.0)  # Wait for Point-LIO to initialize
+            # RC toggle to stop
+            if ENABLE_RC_TOGGLE and reader.check_toggle_pressed():
+                log("RC button pressed — stopping")
+                reader.beep_ack()
+                stack.stop()
+                continue
 
-            # Start SLAM bridge (if available)
-            if SLAM_BRIDGE_SCRIPT.exists():
-                bridge_proc = start_process("SLAM bridge", slam_bridge_cmd())
-                time.sleep(1.0)
-            else:
-                bridge_proc = None
+            # AUTO deactivation
+            if stack.activation_mode == "AUTO" and reader.auto_conditions_lost():
+                log(f"AUTO conditions lost (armed={reader.armed}, mode={reader.mode})")
+                stack.stop()
+                continue
 
-            # Start bag recorder
-            bag_proc = start_process("Bag recorder", bag_record_cmd())
-
-            log_state("ACTIVE",
-                      f"Session #{session_count} running — "
-                      f"monitoring for disarm or mode change")
-
-            # ACTIVE state — monitor continuously
-            while True:
-                time.sleep(1.0 / MONITOR_HZ)
-
-                # Check subprocess health
-                if pointlio_proc and pointlio_proc.poll() is not None:
-                    log("[WARN] Point-LIO exited unexpectedly.")
-                    pointlio_proc = None
-
-                if bridge_proc and bridge_proc.poll() is not None:
-                    log("[WARN] SLAM bridge exited unexpectedly.")
-                    bridge_proc = None
-
-                if bag_proc and bag_proc.poll() is not None:
-                    log("[WARN] Bag recorder exited unexpectedly.")
-                    bag_proc = None
-
-                # Check flight conditions
-                if not reader.flight_conditions_met():
-                    log_state("DEACTIVATING",
-                              f"armed={reader.armed}  mode={reader.mode}")
-                    break
-
-            # Conditions lost — stop flight stack (order matters for clean bag close)
-            stop_process("Bag recorder", bag_proc)
-            bag_proc = None
-            stop_process("SLAM bridge", bridge_proc)
-            bridge_proc = None
-            stop_process("Point-LIO", pointlio_proc)
-            pointlio_proc = None
-
-            # Trigger post-flight
-            postflight_proc = trigger_postflight()
-
-            log_state("WAITING",
-                      f"Session #{session_count} complete. "
-                      f"Re-arm in OFFBOARD to start new session.")
+            time.sleep(1.0 / MONITOR_HZ)
 
     except KeyboardInterrupt:
-        log("Watchdog interrupted — shutting down.")
+        log("Interrupted — shutting down")
     finally:
-        stop_process("Bag recorder", bag_proc)
-        stop_process("SLAM bridge", bridge_proc)
-        stop_process("Point-LIO", pointlio_proc)
+        if stack.is_running:
+            stack.stop()
         reader.shutdown()
         log("Watchdog stopped.")
 

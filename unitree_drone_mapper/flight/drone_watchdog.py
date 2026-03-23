@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""
-drone_watchdog.py — Flight stack supervisor for DronePi.
+"""drone_watchdog.py — Flight stack supervisor for DronePi.
 
-Monitors /mavros/state and manages the Point-LIO SLAM node and ROS 2 bag
-recorder based on the drone's armed and flight mode state.
+Monitors /mavros/state and manages the Point-LIO SLAM node, SLAM bridge,
+and ROS 2 bag recorder based on the drone's armed and flight mode state.
 
 STATE MACHINE
 -------------
-
   WAITING
       Polls /mavros/state every second.
       Condition to advance: armed=True AND mode=OFFBOARD.
-      When condition met -> launches Point-LIO + bag recorder -> ACTIVE.
+      When condition met -> launches Point-LIO + SLAM bridge + bag -> ACTIVE.
 
   ACTIVE
       Monitors /mavros/state continuously.
       Condition to revert: armed=False OR mode != OFFBOARD.
-      When condition lost -> stops Point-LIO + bag recorder -> WAITING.
+      When condition lost -> stops all processes -> WAITING.
       A new session starts automatically if the pilot re-arms in OFFBOARD.
 
 SAFETY DESIGN
@@ -30,10 +28,16 @@ SAFETY DESIGN
     correctly. An unclean bag close corrupts the recording.
   - All state transitions are logged to stdout (captured by journalctl).
 
+SLAM BRIDGE
+-----------
+  The SLAM bridge (_slam_bridge.py) is launched alongside Point-LIO.
+  It forwards Point-LIO poses to /mavros/vision_pose/pose for EKF fusion.
+  Requires EKF2_EV_CTRL=15 in PX4 parameters.
+
 DEPENDENCIES
 ------------
-  rclpy, mavros_msgs  (ROS 2 Jazzy)
-  Standard library only for process management.
+  rclpy, mavros_msgs (ROS 2 Jazzy)
+  flight_controller module (for clean state subscription)
 
 DEPLOYMENT
 ----------
@@ -43,16 +47,14 @@ DEPLOYMENT
   Manual run (for testing):
       source /opt/ros/jazzy/setup.bash
       source ~/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash
-      python3 ~/unitree_lidar_project/unitree_drone_mapper/flight/drone_watchdog.py
+      python3 drone_watchdog.py
 
   View logs:
       sudo journalctl -u drone-watchdog -f
 """
 
 import os
-import re
 import signal
-import subprocess
 import subprocess
 import sys
 import threading
@@ -60,33 +62,41 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── config ────────────────────────────────────────────────────────────────────
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from mavros_msgs.msg import State
 
-ROS_SETUP       = "/opt/ros/jazzy/setup.bash"
-WS_SETUP        = os.path.expanduser(
+# ── Config ────────────────────────────────────────────────────────────────────
+
+ROS_SETUP = "/opt/ros/jazzy/setup.bash"
+WS_SETUP = os.path.expanduser(
     "~/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash"
 )
-ROSBAG_DIR      = "/mnt/ssd/rosbags"
-# Path to run_postflight.py -- auto-triggered after each session.
-# Must live in the same directory as this script.
-POSTFLIGHT_SCRIPT = Path(__file__).parent / "run_postflight.py"
+ROSBAG_DIR = "/mnt/ssd/rosbags"
 
-# Activation mode.
-# REQUIRE_OFFBOARD = True  -- field use: armed AND mode=OFFBOARD required.
-# REQUIRE_OFFBOARD = False -- bench use: armed only, no setpoint stream needed.
-# Set to False for bench testing, True before any real flight.
+# Path to scripts (same directory as this file)
+SCRIPT_DIR = Path(__file__).parent
+SLAM_BRIDGE_SCRIPT = SCRIPT_DIR / "_slam_bridge.py"
+POSTFLIGHT_SCRIPT = SCRIPT_DIR / "run_postflight.py"
+
+# Point-LIO launch
+LAUNCH_FILE = os.path.expanduser(
+    "~/unitree_lidar_project/RPI5/ros2_ws/src/point_lio_ros2/launch/"
+    "combined_lidar_mapping.launch.py"
+)
+
+# Activation mode
+# REQUIRE_OFFBOARD = True  -- field use: armed AND mode=OFFBOARD
+# REQUIRE_OFFBOARD = False -- bench use: armed only
 REQUIRE_OFFBOARD = True
 
-POLL_HZ         = 2          # state poll rate while WAITING (Hz)
-MONITOR_HZ      = 5          # state monitor rate while ACTIVE (Hz)
-GRACEFUL_KILL_S = 5          # seconds before SIGKILL after SIGINT
-MAVROS_WAIT_S   = 15         # seconds to wait for MAVROS to come up after boot
+POLL_HZ = 2           # state poll rate while WAITING
+MONITOR_HZ = 5        # state monitor rate while ACTIVE
+GRACEFUL_KILL_S = 5   # seconds before SIGKILL after SIGINT
+MAVROS_WAIT_S = 15    # seconds to wait for MAVROS on boot
 
-# Topics recorded in every bag session.
-# /cloud_registered  — Point-LIO accumulated map (primary scan data)
-# /aft_mapped_to_init — SLAM pose output
-# /unilidar/imu      — raw IMU for post-processing
-# /mavros/state      — flight mode and arm state for session metadata
+# Topics recorded in every bag session
 BAG_TOPICS = [
     "/cloud_registered",
     "/aft_mapped_to_init",
@@ -94,27 +104,13 @@ BAG_TOPICS = [
     "/mavros/state",
     "/mavros/local_position/pose",
     "/mavros/global_position/global",
+    "/mavros/vision_pose/pose",  # SLAM bridge output for debugging
 ]
 
-# Point-LIO launch command.
-# Sources both the base ROS 2 Jazzy setup and the project workspace overlay.
-# rviz:=false -- no display available on headless Pi.
-# port matches the Unitree 4D L1 USB connection.
-LAUNCH_FILE = os.path.expanduser(
-    "~/unitree_lidar_project/RPI5/ros2_ws/src/point_lio_ros2/launch/"
-    "combined_lidar_mapping.launch.py"
-)
-POINTLIO_CMD = (
-    f"source {ROS_SETUP} && "
-    f"source {WS_SETUP} && "
-    f"ros2 launch {LAUNCH_FILE} "
-    "rviz:=false port:=/dev/ttyUSB0"
-)
-
-# ── logging ───────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 def log(msg: str):
-    """Timestamped log line -- captured by journalctl."""
+    """Timestamped log line — captured by journalctl."""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
@@ -123,17 +119,11 @@ def log_state(state: str, detail: str = ""):
     sep = f"  {detail}" if detail else ""
     log(f"[{state}]{sep}")
 
-# ── process management ────────────────────────────────────────────────────────
+
+# ── Process Management ────────────────────────────────────────────────────────
 
 def start_process(name: str, cmd: str) -> subprocess.Popen:
-    """
-    Launch a shell command in a new process group.
-
-    Using a process group (setsid) ensures that when we send SIGINT or SIGKILL
-    to stop the process, all child processes spawned by the shell (e.g. the
-    actual ros2 node binaries launched by the launch file) are also terminated.
-    Without this, orphan ROS 2 nodes can persist and block the next launch.
-    """
+    """Launch a shell command in a new process group."""
     log(f"Starting {name}...")
     proc = subprocess.Popen(
         ["bash", "-c", cmd],
@@ -146,15 +136,9 @@ def start_process(name: str, cmd: str) -> subprocess.Popen:
 
 
 def stop_process(name: str, proc: subprocess.Popen):
-    """
-    Stop a process cleanly.
-
-    Sends SIGINT first to allow the process to flush buffers and close files
-    (critical for the bag recorder -- an unclean exit corrupts the MCAP file).
-    Waits GRACEFUL_KILL_S seconds, then sends SIGKILL if still running.
-    """
+    """Stop a process cleanly with SIGINT, then SIGKILL if needed."""
     if proc is None or proc.poll() is not None:
-        return  # already dead
+        return
 
     pgid = None
     try:
@@ -173,7 +157,7 @@ def stop_process(name: str, proc: subprocess.Popen):
         proc.wait(timeout=GRACEFUL_KILL_S)
         log(f"{name} stopped cleanly.")
     except subprocess.TimeoutExpired:
-        log(f"{name} did not exit in {GRACEFUL_KILL_S}s -- sending SIGKILL.")
+        log(f"{name} did not exit in {GRACEFUL_KILL_S}s — sending SIGKILL.")
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
@@ -181,16 +165,30 @@ def stop_process(name: str, proc: subprocess.Popen):
         proc.wait()
         log(f"{name} killed.")
 
-# ── bag recording ─────────────────────────────────────────────────────────────
+
+# ── Command Builders ──────────────────────────────────────────────────────────
+
+def pointlio_cmd() -> str:
+    """Build Point-LIO launch command."""
+    return (
+        f"source {ROS_SETUP} && "
+        f"source {WS_SETUP} && "
+        f"ros2 launch {LAUNCH_FILE} rviz:=false port:=/dev/ttyUSB0"
+    )
+
+
+def slam_bridge_cmd() -> str:
+    """Build SLAM bridge launch command."""
+    return (
+        f"source {ROS_SETUP} && "
+        f"source {WS_SETUP} && "
+        f"python3 {SLAM_BRIDGE_SCRIPT}"
+    )
+
 
 def bag_record_cmd() -> str:
-    """
-    Build the ros2 bag record command for the current session.
-
-    Directory name follows the scan_YYYYMMDD_HHMMSS convention expected
-    by /api/flights in serve.py and postprocess_mesh.py.
-    """
-    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    """Build ros2 bag record command for current session."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = f"{ROSBAG_DIR}/scan_{ts}"
     topics = " ".join(BAG_TOPICS)
     return (
@@ -199,28 +197,17 @@ def bag_record_cmd() -> str:
         f"ros2 bag record -o {out} {topics}"
     )
 
-# ── MAVROS state reader ───────────────────────────────────────────────────────
+
+# ── MAVROS State Reader ───────────────────────────────────────────────────────
 
 class MavrosStateReader:
-    """
-    Lightweight ROS 2 subscriber that reads /mavros/state.
-
-    Runs rclpy.spin in a background thread so the main watchdog loop
-    can poll state without blocking. Uses BEST_EFFORT QoS to match
-    MAVROS's publisher profile -- RELIABLE would silently receive nothing.
-    """
+    """Lightweight ROS 2 subscriber for /mavros/state."""
 
     def __init__(self):
-        import rclpy
-        from rclpy.node import Node
-        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-        from mavros_msgs.msg import State
-
-        self._rclpy  = rclpy
-        self._armed  = False
-        self._mode   = ""
+        self._armed = False
+        self._mode = ""
         self._connected = False
-        self._lock   = threading.Lock()
+        self._lock = threading.Lock()
 
         rclpy.init()
         self._node = Node("drone_watchdog")
@@ -234,7 +221,6 @@ class MavrosStateReader:
         self._node.create_subscription(
             State, "/mavros/state", self._cb, qos)
 
-
         self._thread = threading.Thread(
             target=rclpy.spin, args=(self._node,), daemon=True)
         self._thread.start()
@@ -242,10 +228,9 @@ class MavrosStateReader:
 
     def _cb(self, msg):
         with self._lock:
-            self._armed     = msg.armed
-            self._mode      = msg.mode
+            self._armed = msg.armed
+            self._mode = msg.mode
             self._connected = msg.connected
-
 
     @property
     def armed(self) -> bool:
@@ -263,19 +248,7 @@ class MavrosStateReader:
             return self._connected
 
     def flight_conditions_met(self) -> bool:
-        """
-        Return True when activation conditions are met.
-
-        FIELD mode (REQUIRE_OFFBOARD=True, default):
-            armed=True AND mode=OFFBOARD
-            Use for actual flights -- OFFBOARD requires a live setpoint
-            stream which is only present during a real flight operation.
-
-        BENCH mode (REQUIRE_OFFBOARD=False):
-            armed=True only
-            Use for bench testing the watchdog activation without needing
-            a setpoint stream. Set REQUIRE_OFFBOARD=False below to enable.
-        """
+        """Return True when activation conditions are met."""
         with self._lock:
             if REQUIRE_OFFBOARD:
                 return self._armed and self._mode == "OFFBOARD"
@@ -283,52 +256,37 @@ class MavrosStateReader:
                 return self._armed
 
     def shutdown(self):
-        self._rclpy.shutdown()
+        self._node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
-# ── post-flight trigger ──────────────────────────────────────────────────────
+
+# ── Post-flight Trigger ───────────────────────────────────────────────────────
 
 def trigger_postflight() -> subprocess.Popen | None:
-    """
-    Launch run_postflight.py in a background subprocess after a session ends.
-
-    Returns the Popen handle so the watchdog can monitor completion.
-    While this process is running, flight_conditions_met() will block
-    new session activation to prevent nodes from piling up.
-
-    Returns None if the script is missing or failed to launch.
-    """
+    """Launch run_postflight.py in background after session ends."""
     if not POSTFLIGHT_SCRIPT.exists():
         log(f"[WARN] run_postflight.py not found at {POSTFLIGHT_SCRIPT}")
-        log("       Post-flight processing skipped -- run manually.")
         return None
 
     log("Launching post-flight pipeline in background...")
-    log("New session will be blocked until processing completes.")
     try:
         proc = subprocess.Popen(
             [sys.executable, str(POSTFLIGHT_SCRIPT), "--auto", "--skip-wait"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        log(f"Post-flight pipeline started (PID {proc.pid}). "
-            "Viewer will auto-load when complete.")
+        log(f"Post-flight pipeline started (PID {proc.pid})")
         return proc
     except Exception as e:
-        log(f"[WARN] Could not launch post-flight pipeline: {e}")
-        log("       Run manually: python3 run_postflight.py")
+        log(f"[WARN] Could not launch post-flight: {e}")
         return None
 
 
-# ── main watchdog loop ────────────────────────────────────────────────────────
+# ── Main Watchdog Loop ────────────────────────────────────────────────────────
 
 def wait_for_mavros(reader: MavrosStateReader):
-    """
-    Block until MAVROS reports a connected FCU.
-
-    Called once at startup. MAVROS may take 10-20 seconds to initialize
-    after the service starts. The watchdog waits patiently rather than
-    entering the polling loop with stale disconnected state.
-    """
+    """Block until MAVROS reports connected FCU."""
     log(f"Waiting for MAVROS FCU connection (up to {MAVROS_WAIT_S}s)...")
     deadline = time.time() + MAVROS_WAIT_S
     while time.time() < deadline:
@@ -336,93 +294,102 @@ def wait_for_mavros(reader: MavrosStateReader):
             log(f"FCU connected. Mode: {reader.mode}  Armed: {reader.armed}")
             return
         time.sleep(1.0)
-    log("[WARN] FCU not connected after wait -- continuing anyway.")
-    log("       Check Pixhawk USB cable and /dev/ttyACM0 permissions.")
+    log("[WARN] FCU not connected after wait — continuing anyway.")
 
 
 def main():
     log("=" * 50)
     log("DronePi Flight Stack Watchdog")
     if REQUIRE_OFFBOARD:
-        log("Condition to activate: armed=True AND mode=OFFBOARD  (field mode)")
+        log("Activation: armed=True AND mode=OFFBOARD (field mode)")
     else:
-        log("Condition to activate: armed=True only  (bench mode -- REQUIRE_OFFBOARD=False)")
-    log("This script never arms the drone or changes flight mode.")
+        log("Activation: armed=True only (bench mode)")
+    log("This script never arms or changes flight mode.")
     log("=" * 50)
 
     # Ensure rosbag directory exists
     Path(ROSBAG_DIR).mkdir(parents=True, exist_ok=True)
 
-    # Import ROS 2 -- will fail if setup.bash was not sourced
+    # Check SLAM bridge exists
+    if not SLAM_BRIDGE_SCRIPT.exists():
+        log(f"[WARN] SLAM bridge not found: {SLAM_BRIDGE_SCRIPT}")
+        log("       Vision pose fusion will not be available.")
+
     try:
         reader = MavrosStateReader()
     except Exception as e:
         log(f"[FAIL] Could not start ROS 2 node: {e}")
-        log("       Ensure ROS 2 Jazzy is sourced and mavros_msgs is installed.")
         sys.exit(1)
 
     wait_for_mavros(reader)
 
-    pointlio_proc   = None
-    bag_proc        = None
-    postflight_proc = None   # tracked to block new sessions during processing
-    session_count   = 0
+    pointlio_proc = None
+    bridge_proc = None
+    bag_proc = None
+    postflight_proc = None
+    session_count = 0
 
     try:
         while True:
-
-            # ── WAITING state ─────────────────────────────────────────────────
-            # Block new session if post-flight processing is still running.
-            # This prevents Point-LIO and bag nodes from piling up when a
-            # new arm+OFFBOARD cycle starts before the previous mesh is done.
+            # Block new session if post-flight still running
             if postflight_proc is not None:
                 rc = postflight_proc.poll()
                 if rc is None:
-                    # Still running -- block activation regardless of arm state
                     log_state("WAITING",
                               f"armed={reader.armed}  mode={reader.mode or '?'}  "
-                              f"[POST-PROCESSING -- new session blocked]")
+                              f"[POST-PROCESSING]")
                     time.sleep(1.0 / POLL_HZ)
                     continue
                 else:
-                    # Processing finished
                     if rc == 0:
-                        log("Post-flight processing complete. New session allowed.")
+                        log("Post-flight complete. New session allowed.")
                     else:
-                        log(f"[WARN] Post-flight processing exited with code {rc}.")
-                        log("       Check: python3 run_postflight.py --latest")
+                        log(f"[WARN] Post-flight exited with code {rc}")
                     postflight_proc = None
 
+            # WAITING state
             if not reader.flight_conditions_met():
                 log_state("WAITING",
                           f"armed={reader.armed}  mode={reader.mode or '?'}")
                 time.sleep(1.0 / POLL_HZ)
                 continue
 
-            # ── Conditions met -- launch flight stack ─────────────────────────
+            # Conditions met — launch flight stack
             session_count += 1
             log_state("ACTIVATING",
                       f"Session #{session_count}  "
                       f"armed={reader.armed}  mode={reader.mode}")
 
-            pointlio_proc = start_process("Point-LIO", POINTLIO_CMD)
-            # Give Point-LIO 3 seconds to initialize before starting the bag
-            # so the first frames are not lost during node startup.
-            time.sleep(3.0)
+            # Start Point-LIO
+            pointlio_proc = start_process("Point-LIO", pointlio_cmd())
+            time.sleep(3.0)  # Wait for Point-LIO to initialize
+
+            # Start SLAM bridge (if available)
+            if SLAM_BRIDGE_SCRIPT.exists():
+                bridge_proc = start_process("SLAM bridge", slam_bridge_cmd())
+                time.sleep(1.0)
+            else:
+                bridge_proc = None
+
+            # Start bag recorder
             bag_proc = start_process("Bag recorder", bag_record_cmd())
 
             log_state("ACTIVE",
-                      f"Session #{session_count} running -- "
+                      f"Session #{session_count} running — "
                       f"monitoring for disarm or mode change")
 
-            # ── ACTIVE state -- monitor continuously ──────────────────────────
+            # ACTIVE state — monitor continuously
             while True:
                 time.sleep(1.0 / MONITOR_HZ)
 
-                # Check if either subprocess died unexpectedly
+                # Check subprocess health
                 if pointlio_proc and pointlio_proc.poll() is not None:
                     log("[WARN] Point-LIO exited unexpectedly.")
                     pointlio_proc = None
+
+                if bridge_proc and bridge_proc.poll() is not None:
+                    log("[WARN] SLAM bridge exited unexpectedly.")
+                    bridge_proc = None
 
                 if bag_proc and bag_proc.poll() is not None:
                     log("[WARN] Bag recorder exited unexpectedly.")
@@ -434,14 +401,15 @@ def main():
                               f"armed={reader.armed}  mode={reader.mode}")
                     break
 
-            # ── Conditions lost -- stop flight stack ──────────────────────────
+            # Conditions lost — stop flight stack (order matters for clean bag close)
             stop_process("Bag recorder", bag_proc)
             bag_proc = None
+            stop_process("SLAM bridge", bridge_proc)
+            bridge_proc = None
             stop_process("Point-LIO", pointlio_proc)
             pointlio_proc = None
 
-            # Trigger post-flight processing in background.
-            # Store the handle -- watchdog blocks new sessions until done.
+            # Trigger post-flight
             postflight_proc = trigger_postflight()
 
             log_state("WAITING",
@@ -449,9 +417,10 @@ def main():
                       f"Re-arm in OFFBOARD to start new session.")
 
     except KeyboardInterrupt:
-        log("Watchdog interrupted -- shutting down.")
+        log("Watchdog interrupted — shutting down.")
     finally:
         stop_process("Bag recorder", bag_proc)
+        stop_process("SLAM bridge", bridge_proc)
         stop_process("Point-LIO", pointlio_proc)
         reader.shutdown()
         log("Watchdog stopped.")

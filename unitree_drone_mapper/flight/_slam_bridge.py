@@ -1,127 +1,148 @@
 #!/usr/bin/env python3
-"""SLAM odometry bridge: /aft_mapped_to_init (ENU) -> /fmu/in/vehicle_visual_odometry (NED).
+"""SLAM bridge: Point-LIO odometry → MAVROS vision pose input.
 
-Point-LIO outputs poses in ENU (East-North-Up, ROS standard).
-PX4 expects NED (North-East-Down).
+Converts Point-LIO's /aft_mapped_to_init odometry output to the format
+expected by MAVROS on /mavros/vision_pose/pose for EKF fusion.
 
-Conversion:
-    NED.x =  ENU.y   (North = East in ENU... wait, no)
-    NED.x =  ENU.x   ... actually ENU->NED:
-    N =  ENU.y
-    E =  ENU.x
-    D = -ENU.z
+Frame Convention
+----------------
+Point-LIO outputs poses in ENU (East-North-Up), which is the ROS standard.
+MAVROS expects PoseStamped in ENU on /mavros/vision_pose/pose and handles
+the ENU→NED conversion internally before forwarding to PX4 via MAVLink.
 
-Quaternion ENU->NED: rotate by 90 deg around Z then flip Z.
+**Do NOT manually convert ENU→NED here.** That was the bug in the previous
+version which published to the DDS topic /fmu/in/vehicle_visual_odometry.
+MAVROS is the correct interface for PX4 when using ROS 2 with MAVLink.
+
+PX4 Configuration Required
+--------------------------
+Enable vision position fusion in QGroundControl:
+
+    EKF2_EV_CTRL = 15      (enable all vision inputs: pos, vel, yaw, height)
+    EKF2_HGT_REF = 3       (use vision as height reference, optional)
+    EKF2_EV_DELAY = 20     (adjust based on observed lag, typically 10-50ms)
+
+To verify fusion is active, check the EKF2 innovations panel in QGC.
+Vision position residuals should be visible and small (<0.5m).
+
+Usage
+-----
+  # Standalone (for testing)
+  source /opt/ros/jazzy/setup.bash
+  source ~/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash
+  python3 _slam_bridge.py
+
+  # As part of flight stack (launched by drone_watchdog or flight_mission)
+  # See flight_controller.py for integration.
+
+Dependencies
+------------
+  rclpy, nav_msgs, geometry_msgs (ROS 2 Jazzy)
+  Point-LIO must be running and publishing /aft_mapped_to_init
 """
-
-import sys
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
-    QoSProfile, QoSReliabilityPolicy,
-    QoSDurabilityPolicy, QoSHistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
 )
 
-from nav_msgs.msg import Odometry as ROSOdometry
-from px4_msgs.msg import VehicleOdometry
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseStamped
 
-# QoS profiles defined inline -- no dependency on utils.ros_helpers
+# ── QoS profiles ──────────────────────────────────────────────────────────────
+
+# Match Point-LIO's publisher QoS (BEST_EFFORT for sensor data)
 SENSOR_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.BEST_EFFORT,
-    durability=QoSDurabilityPolicy.VOLATILE,
-    history=QoSHistoryPolicy.KEEP_LAST,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+    history=HistoryPolicy.KEEP_LAST,
     depth=5,
 )
-RELIABLE_QOS = QoSProfile(
-    reliability=QoSReliabilityPolicy.RELIABLE,
-    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-    history=QoSHistoryPolicy.KEEP_LAST,
+
+# MAVROS vision_pose subscriber uses default QoS (RELIABLE)
+VISION_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.VOLATILE,
+    history=HistoryPolicy.KEEP_LAST,
     depth=10,
 )
 
 
-def enu_to_ned_position(x_enu, y_enu, z_enu):
-    """Convert ENU position to NED."""
-    return (y_enu, x_enu, -z_enu)
-
-
-def enu_to_ned_quaternion(qx, qy, qz, qw):
-    """Rotate quaternion from ENU to NED frame.
-
-    Apply a fixed rotation: R_ENU_to_NED = Rz(90°) * Rx(180°)
-    Simplified: swap and negate components.
-    """
-    # ENU->NED: multiply by quaternion for 90deg Z + 180deg X
-    # Using the known formula:
-    return (qy, qx, -qz, qw)   # (new_x, new_y, new_z, new_w)
-
-
 class SLAMBridgeNode(Node):
-    """Bridges Point-LIO odometry to PX4 visual odometry input."""
+    """Bridges Point-LIO odometry to MAVROS vision pose input.
+    
+    Subscribes to /aft_mapped_to_init (nav_msgs/Odometry) from Point-LIO
+    and republishes as /mavros/vision_pose/pose (geometry_msgs/PoseStamped)
+    for PX4 EKF fusion via MAVROS.
+    """
 
     def __init__(self):
-        super().__init__("slam_to_px4_bridge")
+        super().__init__("slam_to_mavros_bridge")
 
+        # Publisher: MAVROS vision pose input
+        # MAVROS forwards this to PX4 as VISION_POSITION_ESTIMATE MAVLink msg
         self.pub = self.create_publisher(
-            VehicleOdometry,
-            "/fmu/in/vehicle_visual_odometry",
-            RELIABLE_QOS,
+            PoseStamped,
+            "/mavros/vision_pose/pose",
+            VISION_QOS,
         )
 
-        # /aft_mapped_to_init is the correct pose topic published by the
-        # Point-LIO build on this system. /Odometry is never published.
+        # Subscriber: Point-LIO odometry output
+        # /aft_mapped_to_init is the accumulated SLAM pose in the map frame
         self.sub = self.create_subscription(
-            ROSOdometry,
+            Odometry,
             "/aft_mapped_to_init",
             self._callback,
             SENSOR_QOS,
         )
 
+        # Diagnostics
         self.msg_count = 0
+        self.last_log_time = self.get_clock().now()
+
         self.get_logger().info(
-            "SLAM bridge ready: /aft_mapped_to_init -> /fmu/in/vehicle_visual_odometry"
+            "SLAM bridge started: /aft_mapped_to_init → /mavros/vision_pose/pose"
+        )
+        self.get_logger().info(
+            "Ensure EKF2_EV_CTRL=15 in PX4 for vision fusion"
         )
 
-    def _callback(self, msg: ROSOdometry):
-        p = msg.pose.pose.position
-        q = msg.pose.pose.orientation
-        v = msg.twist.twist.linear
-
-        # Convert position ENU -> NED
-        n, e, d = enu_to_ned_position(p.x, p.y, p.z)
-
-        # Convert quaternion ENU -> NED
-        qx_ned, qy_ned, qz_ned, qw_ned = enu_to_ned_quaternion(q.x, q.y, q.z, q.w)
-
-        # Convert velocity ENU -> NED
-        vn, ve, vd = enu_to_ned_position(v.x, v.y, v.z)
-
-        out = VehicleOdometry()
-        ts = int(self.get_clock().now().nanoseconds / 1000)
-        out.timestamp        = ts
-        out.timestamp_sample = ts
-
-        out.pose_frame    = VehicleOdometry.POSE_FRAME_NED
-        out.velocity_frame = VehicleOdometry.VELOCITY_FRAME_NED
-
-        out.position = [float(n), float(e), float(d)]
-        out.q        = [float(qw_ned), float(qx_ned), float(qy_ned), float(qz_ned)]
-        out.velocity = [float(vn), float(ve), float(vd)]
-
-        # Set covariance diagonals (uncertainty)
-        out.position_variance = [0.01, 0.01, 0.01]
-        out.orientation_variance = [0.01, 0.01, 0.01]
-        out.velocity_variance = [0.05, 0.05, 0.05]
-
+    def _callback(self, msg: Odometry):
+        """Convert Odometry to PoseStamped and publish to MAVROS."""
+        
+        out = PoseStamped()
+        
+        # Use the original timestamp for proper sensor fusion timing
+        out.header.stamp = msg.header.stamp
+        
+        # Frame ID: MAVROS expects 'map' or 'odom' frame
+        # Point-LIO uses 'camera_init' but the pose is in the map frame
+        out.header.frame_id = "map"
+        
+        # Pass through the pose directly — ENU frame, no conversion needed
+        # MAVROS handles ENU→NED conversion internally before MAVLink TX
+        out.pose = msg.pose.pose
+        
         self.pub.publish(out)
-
+        
+        # Periodic logging (every 2 seconds worth of messages at ~50Hz)
         self.msg_count += 1
-        if self.msg_count % 50 == 0:
+        now = self.get_clock().now()
+        elapsed = (now - self.last_log_time).nanoseconds / 1e9
+        
+        if elapsed >= 2.0:
+            p = msg.pose.pose.position
+            rate = self.msg_count / elapsed
             self.get_logger().info(
-                f"Bridge: {self.msg_count} frames  "
-                f"NED=({n:.2f},{e:.2f},{d:.2f})"
+                f"Bridge: {self.msg_count} frames ({rate:.1f}Hz)  "
+                f"ENU=({p.x:.2f}, {p.y:.2f}, {p.z:.2f})"
             )
+            self.msg_count = 0
+            self.last_log_time = now
 
 
 def main():
@@ -130,8 +151,9 @@ def main():
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        node.get_logger().info("SLAM bridge stopped by user")
     finally:
+        node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

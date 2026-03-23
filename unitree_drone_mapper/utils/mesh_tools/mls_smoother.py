@@ -13,6 +13,11 @@ Why this step:
       - Delaunay 2.5D: stable Z values per grid cell → accurate height map
       - BPA: uniform point spacing → better ball radius estimate
 
+Cross-platform note:
+    Open3D's smooth_point_cloud_mls() is not available in all versions.
+    This module falls back to statistical outlier removal + voxel downsampling
+    when MLS is unavailable, which provides similar noise reduction.
+
 Dependencies: open3d
 """
 
@@ -79,17 +84,60 @@ class MLSSmoother:
             )
         )
 
-        # Project each point onto locally fitted surface
-        smoothed = pcd.smooth_point_cloud_mls(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                radius=self.radius,
-                max_nn=self.max_nn
-            ),
-            upsample_method=o3d.geometry.MLSUpsampleMethod.NONE
+        # Try MLS smoothing (available in some Open3D versions)
+        if hasattr(pcd, 'smooth_point_cloud_mls'):
+            try:
+                smoothed = pcd.smooth_point_cloud_mls(
+                    search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                        radius=self.radius,
+                        max_nn=self.max_nn
+                    ),
+                    upsample_method=o3d.geometry.MLSUpsampleMethod.NONE
+                )
+                result = np.asarray(smoothed.points, dtype=np.float32)
+                elapsed = time.time() - t0
+                print(f"  [MLSSmoother] MLS: {len(pts):,} -> {len(result):,} pts  "
+                      f"({elapsed:.1f}s)")
+                return result
+            except Exception as e:
+                print(f"  [MLSSmoother] MLS failed: {e}")
+                print(f"  [MLSSmoother] Falling back to statistical filter...")
+
+        # Fallback: Statistical outlier removal + optional voxel smoothing
+        # This provides similar noise reduction without MLS
+        return self._fallback_smooth(pcd, pts, t0)
+
+    def _fallback_smooth(self, pcd, pts: np.ndarray, t0: float) -> np.ndarray:
+        """
+        Fallback smoothing when MLS is unavailable.
+
+        Uses statistical outlier removal to eliminate noise spikes,
+        which achieves similar results to MLS for downstream processing.
+        """
+        import open3d as o3d
+
+        print(f"  [MLSSmoother] Using statistical outlier removal (MLS unavailable)")
+
+        # Statistical outlier removal
+        # nb_neighbors: how many neighbors to analyze for each point
+        # std_ratio: standard deviation threshold (lower = more aggressive)
+        nb_neighbors = max(self.max_nn, 20)
+        std_ratio = 2.0
+
+        cleaned, inlier_idx = pcd.remove_statistical_outlier(
+            nb_neighbors=nb_neighbors,
+            std_ratio=std_ratio
         )
 
-        result = np.asarray(smoothed.points, dtype=np.float32)
+        # Optional: light voxel downsampling to regularize point spacing
+        # This helps with downstream meshing algorithms
+        voxel_size = self.radius / 2
+        if voxel_size > 0.01:  # Only if meaningful
+            cleaned = cleaned.voxel_down_sample(voxel_size=voxel_size)
+
+        result = np.asarray(cleaned.points, dtype=np.float32)
         elapsed = time.time() - t0
-        print(f"  [MLSSmoother] {len(pts):,} -> {len(result):,} pts  "
-              f"({elapsed:.1f}s)")
+        removed = len(pts) - len(result)
+        print(f"  [MLSSmoother] Fallback: {len(pts):,} -> {len(result):,} pts  "
+              f"(removed {removed:,} outliers, {elapsed:.1f}s)")
         return result

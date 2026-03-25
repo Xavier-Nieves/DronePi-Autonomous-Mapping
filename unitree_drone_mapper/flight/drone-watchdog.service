@@ -2,6 +2,9 @@
 Description=DronePi Flight Stack Watchdog (Point-LIO + bag recorder)
 # Must start after MAVROS so the /mavros/state topic exists to subscribe to.
 # Also depends on the SSD mount so bag recording has a valid output path.
+# dronepi-main.service declares Requires=drone-watchdog.service, so if this
+# service fails to start or crashes unrecoverably, main.py will also be stopped
+# by systemd — the correct fail-safe when the bag/postflight supervisor is gone.
 After=mavros.service mnt-ssd.mount dronepi-hotspot.service
 Wants=mavros.service mnt-ssd.mount dronepi-hotspot.service
 
@@ -11,21 +14,29 @@ User=dronepi
 Environment="HOME=/home/dronepi"
 
 # Source ROS 2 before running the watchdog so rclpy and mavros_msgs
-# are importable. The watchdog itself launches Point-LIO and the bag
-# recorder as subprocesses with their own source calls.
+# are importable. The watchdog launches Point-LIO and the bag recorder
+# as subprocesses with their own source calls.
 ExecStart=/bin/bash -c "\
     source /opt/ros/jazzy/setup.bash && \
     source /home/dronepi/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash && \
     python3 /home/dronepi/unitree_lidar_project/unitree_drone_mapper/flight/drone_watchdog.py"
 
-# Restart the watchdog if it crashes -- but not if it exits cleanly (e.g.
-# systemctl stop). on-failure avoids restart loops on unrecoverable errors.
+# Remove lock file on watchdog stop or crash. Prevents a stale manual_scan
+# lock from blocking the next boot if the watchdog dies mid-session.
+# main.py also calls clear_lock() on startup as a second guard.
+ExecStopPost=/bin/rm -f /tmp/dronepi_mission.lock
+
+# Restart the watchdog if it crashes, but not on a clean stop (e.g. systemctl stop).
 Restart=on-failure
 RestartSec=10
 
 # Allow time for the watchdog to stop Point-LIO and close the bag cleanly
 # before systemd sends SIGKILL. Bag close takes up to 5s (GRACEFUL_KILL_S).
 TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drone-watchdog
 
 [Install]
 WantedBy=multi-user.target

@@ -795,6 +795,20 @@
   
   <button class="hbtn" id="btn-measure" title="Measure distance (M)">📏 Measure</button>
   
+  <button id="btn-debug" title="Show all PLY files including intermediate outputs" onclick="toggleDebugMode()" style="
+    font-family:'Courier New',monospace;
+    font-size:9px;
+    letter-spacing:1px;
+    padding:3px 8px;
+    background:transparent;
+    border:1px solid #2a3a50;
+    color:#4a6a8a;
+    cursor:pointer;
+    text-transform:uppercase;
+    white-space:nowrap;
+    transition:all 0.2s;
+  ">🔬</button>
+  
   <div class="toggle-wrap">
     <span class="toggle-label">Purple</span>
     <div class="toggle-switch" id="color-toggle" title="Toggle color ramp style" onclick="toggleColorMode()"></div>
@@ -1058,51 +1072,6 @@
         <div class="lp-title">GPS Track</div>
         <canvas id="gps-map-canvas"></canvas>
         <div id="gps-coords">Lat: — &nbsp;|&nbsp; Lon: —</div>
-      </div>
-
-      <!-- RTK Status -->
-      <div class="lp-section">
-        <div class="lp-title">◈ RTK Status
-          <span style="font-size:8px;color:#2a4a6a;letter-spacing:0.5px;margin-left:6px;text-transform:none;">
-            — connect hardware to activate
-          </span>
-        </div>
-        <div class="telem-grid">
-          <div class="telem-card" id="card-rtk-fix">
-            <div class="telem-label">RTK Fix</div>
-            <div class="telem-value" id="val-rtk-fix" style="font-size:11px;">—</div>
-          </div>
-          <div class="telem-card" id="card-rtk-sats">
-            <div class="telem-label">RTK Sats</div>
-            <div class="telem-value" id="val-rtk-sats">—</div>
-          </div>
-          <div class="telem-card" id="card-rtk-age">
-            <div class="telem-label">Corr. Age</div>
-            <div class="telem-value" id="val-rtk-age">—<span class="telem-unit">s</span></div>
-          </div>
-          <div class="telem-card" id="card-rtk-baseline">
-            <div class="telem-label">Baseline</div>
-            <div class="telem-value" id="val-rtk-baseline">—<span class="telem-unit">m</span></div>
-          </div>
-        </div>
-        <!-- RTK fix quality indicator -->
-        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;">
-          <div id="rtk-fix-dot" style="
-            width:10px;height:10px;border-radius:50%;
-            background:#2a3a50;border:1px solid #3a5a7a;
-            transition:background 0.4s;flex-shrink:0;
-          "></div>
-          <div id="rtk-fix-label" style="font-size:9px;color:#3a5a7a;font-family:'Courier New',monospace;letter-spacing:0.5px;">
-            Waiting for RTK hardware...
-          </div>
-        </div>
-        <!-- GPS1 vs GPS2 RTK detail -->
-        <div style="margin-top:8px;">
-          <div style="font-size:8px;color:#3a5a7a;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;">GPS1 / GPS2 RTK</div>
-          <div id="val-rtk-detail" style="font-size:9px;color:#3a5a7a;font-family:'Courier New',monospace;letter-spacing:0.5px;line-height:1.8;">
-            GPS1: — &nbsp;|&nbsp; GPS2: —
-          </div>
-        </div>
       </div>
 
       <!-- Topic plot -->
@@ -1623,40 +1592,68 @@ document.getElementById('folder-input').addEventListener('change', async (e) => 
 
 // Track active Pi flight folder
 let activePiFlight = null;
+let debugMode = false;
+
+// Intermediate/debug file patterns — hidden in normal mode
+const DEBUG_PATTERNS = ['debug_', 'zbuffer', '_dtm', '_dsm', '_ground',
+  '_nonground', '_classified', '_raw', '_capped', '_mls'];
+
+function isDebugFile(filename) {
+  const lower = filename.toLowerCase();
+  return DEBUG_PATTERNS.some(p => lower.includes(p));
+}
+
+function toggleDebugMode() {
+  debugMode = !debugMode;
+  const btn = document.getElementById('btn-debug');
+  btn.style.borderColor  = debugMode ? '#ffb44a' : '#2a3a50';
+  btn.style.color        = debugMode ? '#ffb44a' : '#4a6a8a';
+  btn.title = debugMode
+    ? 'Debug ON — showing intermediate outputs'
+    : 'Show all PLY files including intermediate outputs';
+  // Refresh dropdown if a flight is already loaded
+  if (activePiFlight) populateFileSelector(activePiFlight);
+}
+window.toggleDebugMode = toggleDebugMode;
 
 function populateFileSelector(piFlight = null) {
   const selector = document.getElementById('file-selector');
 
-  // ── If switching to a Pi flight folder ───────────────────────────────────
+  // ── Pi flight folder mode ─────────────────────────────────────────────────
   if (piFlight) {
     activePiFlight = piFlight;
-    allPlyFiles = [];    // clear local files — Pi flight is now active folder
+    allPlyFiles = [];
     categorizedFiles = { cloud: [], mesh: [], other: [] };
 
-    const label = `${piFlight.id} (${piFlight.all_plys?.length || 0} files)`;
+    const allFiles   = piFlight.all_plys || [];
+    const shown      = allFiles.filter(f => debugMode || !isDebugFile(f));
+    const hiddenCount = allFiles.filter(isDebugFile).length;
+
+    // Dropdown header label — no mention of "hidden"
+    const label = debugMode
+      ? `${piFlight.id} — all files`
+      : `${piFlight.id}`;
     selector.innerHTML = `<option value="">-- ${label} --</option>`;
     selector.disabled = false;
 
-    // Add all PLY files from this flight
-    if (piFlight.all_plys && piFlight.all_plys.length > 0) {
+    if (shown.length > 0) {
       const group = document.createElement('optgroup');
-      group.label = `🛰 ${piFlight.id}`;
-      piFlight.all_plys.forEach(filename => {
-        const opt = document.createElement('option');
-        const url = `rosbags/${piFlight.id}/${filename}`;
-        opt.value = `__pi__${url}`;
-        // Label with icon hint
-        const icon = filename.includes('mesh') ? '🔷' :
-                     filename.includes('cloud') ? '☁️' : '📄';
+      group.label = debugMode ? `🛰 ${piFlight.id} [ALL FILES]` : `🛰 ${piFlight.id}`;
+      shown.forEach(filename => {
+        const opt  = document.createElement('option');
+        const url  = `rosbags/${piFlight.id}/${filename}`;
+        opt.value  = `__pi__${url}`;
+        const icon = filename.includes('mesh')   ? '🔷' :
+                     filename.includes('cloud')  ? '☁️' :
+                     isDebugFile(filename)       ? '🔬' : '📄';
         opt.textContent = `${icon} ${filename}`;
         group.appendChild(opt);
       });
       selector.appendChild(group);
     }
 
-    // Update flight label in header
-    document.getElementById('info-flight').textContent = piFlight.id;
-    document.getElementById('info-points').textContent =
+    document.getElementById('info-flight').textContent  = piFlight.id;
+    document.getElementById('info-points').textContent  =
       piFlight.point_count ? `${parseInt(piFlight.point_count).toLocaleString()} pts` : '';
     return;
   }
@@ -1664,12 +1661,12 @@ function populateFileSelector(piFlight = null) {
   // ── Local folder mode ─────────────────────────────────────────────────────
   activePiFlight = null;
   selector.innerHTML = `<option value="">-- Select PLY (${allPlyFiles.length} files) --</option>`;
-  selector.disabled = allPlyFiles.length === 0;
+  selector.disabled  = allPlyFiles.length === 0;
 
   const groups = [
-    { label: '🔷 Final Mesh', files: categorizedFiles.mesh },
+    { label: '🔷 Final Mesh',  files: categorizedFiles.mesh  },
     { label: '☁️ Point Cloud', files: categorizedFiles.cloud },
-    { label: '📄 Other', files: categorizedFiles.other }
+    { label: '📄 Other',       files: categorizedFiles.other },
   ];
 
   for (const group of groups) {
@@ -1677,8 +1674,8 @@ function populateFileSelector(piFlight = null) {
       const optgroup = document.createElement('optgroup');
       optgroup.label = group.label;
       for (const file of group.files) {
-        const option = document.createElement('option');
-        option.value = file.name;
+        const option       = document.createElement('option');
+        option.value       = file.name;
         option.textContent = file.name;
         optgroup.appendChild(option);
       }
@@ -1686,7 +1683,6 @@ function populateFileSelector(piFlight = null) {
     }
   }
 
-  // Re-add Pi server files below local files if available
   if (allFlights.length > 0) populatePiFilesInSelector(allFlights);
 }
 
@@ -2373,26 +2369,16 @@ window.openFoxgloveTab = openFoxgloveTab;
 // ══════════════════════════════════════════════════════════════════════════════
 const TOPIC_MAP = {
   // MAVLink/ROS topics
-  '/mavros/state':                              parseState,
-  '/mavros/global_position/rel_alt':            parseAlt,
-  '/mavros/local_position/velocity_local':      parseSpeed,
-  '/mavros/imu/data':                           parseIMU,
-  '/mavros/global_position/global':             parseGPS,
-  // GPS status — HDOP, VDOP, fix type
-  '/mavros/global_position/raw/fix':            parseGpsFix,
-  '/mavros/global_position/raw/satellites':     parseGpsSatellites,
-  // EKF status
-  '/mavros/local_position/pose_cov':            parseEkfStatus,
-  // RTK — mavros_msgs/msg/GPSRTK and RTKBaseline
-  // Populated when RTK hardware is connected
-  '/mavros/gpsstatus/gps1/rtk':                 (m) => parseGpsRtk(m, 1),
-  '/mavros/gpsstatus/gps2/rtk':                 (m) => parseGpsRtk(m, 2),
-  '/mavros/gps_rtk/rtk_baseline':               parseRtkBaseline,
+  '/mavros/state':                          parseState,
+  '/mavros/global_position/rel_alt':        parseAlt,
+  '/mavros/local_position/velocity_local':  parseSpeed,
+  '/mavros/imu/data':                       parseIMU,
+  '/mavros/global_position/global':         parseGPS,
   // PX4 ROS2
-  '/fmu/out/vehicle_attitude':                  parseIMU,
-  '/fmu/out/vehicle_gps_position':              parseGPS,
+  '/fmu/out/vehicle_attitude':              parseIMU,
+  '/fmu/out/vehicle_gps_position':          parseGPS,
   // RPI health node topics (published by rpi_health_node.py)
-  '/rpi/health':                                parseRpiHealth,
+  '/rpi/health':                            parseRpiHealth,
 };
 
 let gpsTrack = [];
@@ -2566,114 +2552,6 @@ function parseGPS(m) {
     drawGpsMap();
   }
   if (sats !== null) setVal('val-sats', sats);
-}
-
-// ── RTK parsers ────────────────────────────────────────────────────────────
-// mavros_msgs/msg/GPSRTK fields:
-//   header, rtk_receiver_id, wn, tow, rtk_health, rtk_rate, nsats,
-//   baseline_coords_type, baseline_a_mm, baseline_b_mm, baseline_c_mm,
-//   accuracy, iar_num_hypotheses
-
-// RTK fix type labels — based on rtk_health field
-const RTK_FIX_LABELS = {
-  0: 'NO RTK',
-  1: 'FLOAT',
-  2: 'FIXED',
-  3: 'FIXED',
-};
-const RTK_FIX_COLORS = {
-  0: 'danger',
-  1: 'warn',
-  2: 'good',
-  3: 'good',
-};
-const RTK_DOT_COLORS = {
-  0: '#df4a4a',
-  1: '#ffb44a',
-  2: '#4adf8a',
-  3: '#4adf8a',
-};
-
-// Track GPS1 and GPS2 RTK state separately
-const rtkState = { 1: null, 2: null };
-
-function parseGpsRtk(m, gpsNum) {
-  const health  = m.rtk_health ?? null;
-  const nsats   = m.nsats ?? null;
-  const tow     = m.tow ?? null;  // time of week — used for correction age
-
-  // Store per-GPS state
-  rtkState[gpsNum] = { health, nsats, tow };
-
-  // Update GPS1/GPS2 detail line
-  const g1 = rtkState[1];
-  const g2 = rtkState[2];
-  const g1label = g1 ? (RTK_FIX_LABELS[g1.health] ?? '?') : '—';
-  const g2label = g2 ? (RTK_FIX_LABELS[g2.health] ?? '?') : '—';
-  document.getElementById('val-rtk-detail').textContent =
-    `GPS1: ${g1label}  |  GPS2: ${g2label}`;
-
-  // Use GPS1 as primary for main cards (best fix wins if both available)
-  const primary = rtkState[1] ?? rtkState[2];
-  if (!primary) return;
-
-  const fixKey   = primary.health ?? 0;
-  const fixLabel = RTK_FIX_LABELS[fixKey] ?? 'UNKNOWN';
-  const fixState = RTK_FIX_COLORS[fixKey] ?? '';
-  const dotColor = RTK_DOT_COLORS[fixKey] ?? '#2a3a50';
-
-  // Fix card
-  const fixEl = document.getElementById('val-rtk-fix');
-  if (fixEl) {
-    fixEl.textContent = fixLabel;
-    fixEl.style.color = dotColor;
-  }
-  document.getElementById('card-rtk-fix').className = `telem-card ${fixState}`;
-
-  // Satellites card
-  if (nsats !== null) {
-    setCard('val-rtk-sats', String(nsats),
-      nsats < 4 ? 'danger' : nsats < 6 ? 'warn' : 'good',
-      'card-rtk-sats'
-    );
-  }
-
-  // Dot indicator
-  document.getElementById('rtk-fix-dot').style.background = dotColor;
-  document.getElementById('rtk-fix-label').textContent =
-    fixKey >= 2
-      ? `RTK ${fixLabel} — cm-level accuracy`
-      : fixKey === 1
-        ? 'RTK FLOAT — dm-level accuracy'
-        : 'No RTK fix — connect base station';
-  document.getElementById('rtk-fix-label').style.color =
-    fixKey >= 2 ? '#4adf8a' : fixKey === 1 ? '#ffb44a' : '#3a5a7a';
-}
-
-function parseRtkBaseline(m) {
-  // RTKBaseline: baseline_a_mm, baseline_b_mm, baseline_c_mm (NED components in mm)
-  const a = m.baseline_a_mm ?? null;
-  const b = m.baseline_b_mm ?? null;
-  const c = m.baseline_c_mm ?? null;
-
-  if (a !== null && b !== null && c !== null) {
-    // 3D baseline distance in metres
-    const dist = Math.sqrt(a*a + b*b + c*c) / 1000.0;
-    setCard('val-rtk-baseline', dist.toFixed(2),
-      dist > 50 ? 'warn' : '',
-      'card-rtk-baseline'
-    );
-  }
-
-  // Correction age — tow (time of week ms) delta not available here
-  // age_of_corrections field if present
-  const age = m.age_of_corrections ?? null;
-  if (age !== null) {
-    setCard('val-rtk-age', age.toFixed(1),
-      age > 5 ? 'danger' : age > 2 ? 'warn' : 'good',
-      'card-rtk-age'
-    );
-  }
 }
 
 // ── UI helpers ─────────────────────────────────────────────────────────────

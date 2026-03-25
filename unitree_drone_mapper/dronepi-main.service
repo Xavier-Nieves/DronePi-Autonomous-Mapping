@@ -1,0 +1,25 @@
+[Unit]
+Description=DronePi Flight Mode Orchestrator (main.py)
+After=network.target mavros.service drone-watchdog.service
+Requires=mavros.service drone-watchdog.service
+
+[Service]
+Type=simple
+User=dronepi
+Restart=on-failure
+RestartSec=5
+
+ExecStart=/bin/bash -c "\
+    source /opt/ros/jazzy/setup.bash && \
+    source /home/dronepi/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash && \
+    python3 /home/dronepi/unitree_lidar_project/unitree_drone_mapper/main.py"
+
+# Ensure no stale lock file if the service crashes before clearing it
+ExecStopPost=/bin/rm -f /tmp/dronepi_mission.lock
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dronepi-main
+
+[Install]
+WantedBy=multi-user.target

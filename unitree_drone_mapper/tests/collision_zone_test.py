@@ -43,6 +43,7 @@ Dependencies
 """
 
 import argparse
+import json
 import math
 import os
 import signal
@@ -77,9 +78,11 @@ LAUNCH_FILE = os.path.expanduser(
     "~/unitree_lidar_project/RPI5/ros2_ws/src/point_lio_ros2/launch/"
     "combined_lidar_mapping.launch.py"
 )
-LIDAR_PORT  = "/dev/ttyUSB0"
-DEFAULT_OUT = Path("/mnt/ssd/collision_test")
-DEFAULT_DUR = 45   # seconds
+LIDAR_PORT   = "/dev/ttyUSB0"
+DEFAULT_OUT  = Path("/mnt/ssd/collision_test")
+DEFAULT_DUR  = 45    # seconds
+MISSION_LOCK = Path("/tmp/dronepi_mission.lock")
+POINTLIO_TIMEOUT_S = 30   # Max seconds to wait for /cloud_registered
 
 # ── Logging helpers ───────────────────────────────────────────────────────────
 
@@ -93,6 +96,34 @@ def header(msg):
     print(f"\n{'═' * 58}", flush=True)
     print(f"  {msg}", flush=True)
     print(f"{'═' * 58}", flush=True)
+
+
+# ── Watchdog Lock Helpers ─────────────────────────────────────────────────────
+
+def write_bench_lock() -> None:
+    """Write bench_scan lock so the watchdog yields for the duration of this test.
+
+    The watchdog treats bench_scan identically to autonomous mode — it stops
+    any running stack and loops passively until the lock is cleared. This
+    prevents a port conflict on /dev/ttyUSB0 when this script launches
+    Point-LIO directly.
+    """
+    MISSION_LOCK.write_text(
+        json.dumps({"mode": "bench_scan",
+                    "started_at": datetime.now().isoformat()}))
+    info("Watchdog lock written (bench_scan) — watchdog yielding")
+
+
+def clear_bench_lock() -> None:
+    """Clear the bench_scan lock so the watchdog resumes normal operation."""
+    if MISSION_LOCK.exists():
+        try:
+            data = json.loads(MISSION_LOCK.read_text())
+            if data.get("mode") == "bench_scan":
+                MISSION_LOCK.unlink()
+                info("Watchdog lock cleared — watchdog resuming")
+        except Exception:
+            pass
 
 
 # ── Point Cloud Collector ─────────────────────────────────────────────────────
@@ -371,12 +402,74 @@ class PointLIOLauncher:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        info(f"Point-LIO PID {self._proc.pid} — waiting 6 s for initialisation...")
-        time.sleep(6)
+        info(f"Point-LIO PID {self._proc.pid} — waiting for /cloud_registered...")
+
+        # Wait for /cloud_registered to publish before returning.
+        # This replaces a fixed sleep and ensures the collector node never
+        # starts spinning before SLAM output is actually available.
+        if not self._wait_for_cloud(timeout=POINTLIO_TIMEOUT_S):
+            if self._proc.poll() is not None:
+                warn("Point-LIO exited before publishing — check LiDAR connection")
+                return False
+            warn(f"/cloud_registered not seen after {POINTLIO_TIMEOUT_S}s — proceeding anyway")
+
         if self._proc.poll() is not None:
             warn("Point-LIO exited immediately — check LiDAR connection")
             return False
-        ok("Point-LIO running")
+        ok("Point-LIO running and publishing /cloud_registered")
+        return True
+
+    def _wait_for_cloud(self, timeout: float) -> bool:
+        """Block until /cloud_registered publishes or timeout expires.
+
+        Runs a temporary rclpy context in a background thread. This is safe
+        here because PointLIOLauncher.start() is called before the main
+        rclpy.init() in main(), so no context conflict exists at this point.
+        """
+        import rclpy
+        from rclpy.node import Node
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        from sensor_msgs.msg import PointCloud2
+
+        received  = threading.Event()
+        last_tick = [-1]
+
+        def _spin():
+            rclpy.init()
+            node = Node("pointlio_readiness_check")
+            qos  = QoSProfile(
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            )
+            node.create_subscription(
+                PointCloud2, "/cloud_registered",
+                lambda msg: received.set(), qos
+            )
+            while not received.is_set() and rclpy.ok():
+                rclpy.spin_once(node, timeout_sec=0.1)
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+
+        spin_thread = threading.Thread(target=_spin, daemon=True)
+        spin_thread.start()
+
+        t0 = time.time()
+        while not received.is_set():
+            elapsed = time.time() - t0
+            if elapsed >= timeout:
+                return False
+            tick = int(elapsed) // 5
+            if tick != last_tick[0] and int(elapsed) > 0:
+                info(f"Waiting for /cloud_registered... ({elapsed:.0f}s / {timeout:.0f}s)")
+                last_tick[0] = tick
+            # Also abort early if Point-LIO process died
+            if self._proc.poll() is not None:
+                return False
+            time.sleep(0.5)
+
+        info(f"/cloud_registered confirmed ({time.time() - t0:.1f}s after launch)")
         return True
 
     def stop(self) -> None:
@@ -510,11 +603,16 @@ def main():
     info("            Run again with --output pointing to same folder or new folder")
     print(flush=True)
 
+    # Write bench_scan lock so the watchdog yields while this test owns
+    # the Point-LIO process and /dev/ttyUSB0 port.
+    write_bench_lock()
+
     # ── Launch Point-LIO ──────────────────────────────────────────────────────
     launcher = PointLIOLauncher()
     if not args.no_pointlio:
         if not launcher.start():
             warn("Point-LIO failed to start. Exiting.")
+            clear_bench_lock()
             sys.exit(1)
     else:
         info("Skipping Point-LIO launch (--no-pointlio flag set)")
@@ -565,6 +663,7 @@ def main():
     node.destroy_node()
     if rclpy.ok():
         rclpy.shutdown()
+    clear_bench_lock()
     launcher.stop()
 
     # ── Process and export ────────────────────────────────────────────────────
@@ -574,6 +673,7 @@ def main():
 
     if len(points) == 0:
         warn("No points collected — check LiDAR connection and Point-LIO output")
+        clear_bench_lock()
         sys.exit(1)
 
     raw_csv      = export_raw_csv(points, out_dir)

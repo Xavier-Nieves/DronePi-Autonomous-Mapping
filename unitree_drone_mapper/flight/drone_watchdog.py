@@ -440,6 +440,18 @@ def main() -> None:
         while True:
             lock_mode = read_lock_mode()
 
+            # ── BENCH TEST (bench_scan) — test script owns the stack ─────
+            # Written by test_manual_scan.py --no-disarm-stop.
+            # Watchdog yields entirely so the test script can manage
+            # Point-LIO and the bag recorder without a port conflict.
+            if lock_mode == "bench_scan":
+                if stack.is_running:
+                    log("Lock mode switched to bench_scan — stopping watchdog stack")
+                    stack.stop()
+                log("[WATCHDOG] bench_scan lock active — yielding to test script")
+                time.sleep(1.0 / POLL_HZ)
+                continue
+
             # ── MODE 3 (autonomous) — main.py owns the stack ──────────────
             # Watchdog steps aside entirely; main.py manages all processes.
             if lock_mode == "autonomous":

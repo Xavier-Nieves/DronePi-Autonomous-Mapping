@@ -324,7 +324,7 @@ class CollisionMonitor(Node):
             agl_str = f"{agl:.2f}m" if agl is not None else "no data"
             self.get_logger().info(
                 f"Zone={zone_msg.data}  closest={closest}  "
-                f"sectors={len(active)}/{NUM_SECTORS}  AGL={agl_str}"
+                f"sectors={len(finite)}/{NUM_SECTORS}  AGL={agl_str}"
                 + ("  [STALE — no cloud data]" if stale else "")
             )
             self._last_log = now

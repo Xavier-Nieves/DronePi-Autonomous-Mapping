@@ -8,20 +8,31 @@ flying manually in STABILIZED, ALTCTL, or POSCTL mode.
 
 What this script does
 ---------------------
-1. Verifies watchdog is running and hands off to supervised mode
-2. Checks LiDAR is connected and healthy
-3. Waits for your command to start scanning
-4. Starts Point-LIO + bag recording on your command
+1. Verifies LiDAR is connected and hardware is healthy
+2. Waits for your command to start scanning
+3. Starts Point-LIO and waits for /cloud_registered to publish
+4. Starts bag recording only once SLAM output is confirmed
 5. You fly manually via RC in any flight mode
 6. Stop scanning on your command (or on disarm)
 7. Runs postflight processing automatically
-8. Restores watchdog to normal operation
+8. Clears the mission lock so watchdog resumes normal operation
+
+Lock File Protocol
+------------------
+  bench_scan  — Written by this script when --no-disarm-stop is set.
+                Watchdog yields entirely (same as autonomous mode).
+                Use for indoor bench testing without a real flight.
+
+  manual_scan — Written by this script during real flights.
+                Watchdog monitors for disarm and triggers post-flight.
+                Do NOT use --no-disarm-stop in this mode.
 
 This script does NOT require OFFBOARD mode or GPS lock.
 You fly entirely via RC -- the script only manages the scanning stack.
 
 Usage
 -----
+  # Normal outdoor flight scan
   python3 test_manual_scan.py
 
   # Skip LiDAR health check (LiDAR already confirmed working)
@@ -29,6 +40,9 @@ Usage
 
   # Skip postflight processing (process manually later)
   python3 test_manual_scan.py --no-postflight
+
+  # Indoor bench test — watchdog yields, disarm auto-stop disabled
+  python3 test_manual_scan.py --no-disarm-stop --skip-lidar-check --no-postflight
 
 SAFETY
 ------
@@ -49,7 +63,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── paths ─────────────────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT  = Path(__file__).parent.parent
 FLIGHT_DIR    = PROJECT_ROOT / "flight"
@@ -68,10 +82,11 @@ MISSION_LOCK      = Path("/tmp/dronepi_mission.lock")
 LIDAR_PORT        = Path("/dev/ttyUSB0")
 ROSBAG_DIR        = Path("/mnt/ssd/rosbags")
 
-GRACEFUL_KILL_S = 5
-POINTLIO_INIT_S = 5
+GRACEFUL_KILL_S    = 5
+POINTLIO_TIMEOUT_S = 30   # Max seconds to wait for /cloud_registered
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def log(msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -119,14 +134,19 @@ def stop_proc(name: str, proc: subprocess.Popen):
     except ProcessLookupError:
         pass
 
-# ── LiDAR health check ────────────────────────────────────────────────────────
+
+# ── LiDAR Health Check ────────────────────────────────────────────────────────
 
 def check_lidar() -> bool:
-    """
-    Three outcome LiDAR check:
-      1. /dev/ttyUSB0 absent  -> LiDAR off or unplugged
-      2. Device present, no data within 8s -> hardware issue
-      3. Device present, data flowing -> healthy
+    """Three-outcome LiDAR check.
+
+    1. /dev/ttyUSB0 absent          → LiDAR off or unplugged
+    2. Device present, no data 8s   → Point-LIO not yet running (non-fatal)
+    3. Device present, data flowing → healthy
+
+    Note: /unilidar/cloud only publishes after the combined launch starts.
+    A timeout warning at this stage is expected and non-fatal — the
+    device-present result alone is sufficient to proceed.
     """
     if not LIDAR_PORT.exists():
         log("[FAIL] LiDAR not detected at /dev/ttyUSB0")
@@ -134,9 +154,8 @@ def check_lidar() -> bool:
         return False
 
     log(f"LiDAR device found at {LIDAR_PORT}")
-    log("Checking if LiDAR is publishing (8s timeout)...")
+    log("Checking if /unilidar/cloud is already publishing (8s timeout)...")
 
-    # Quick topic check -- start Point-LIO briefly then check for data
     try:
         import rclpy
         from rclpy.node import Node
@@ -147,12 +166,12 @@ def check_lidar() -> bool:
 
         rclpy.init()
         node = Node("lidar_health_check")
-        qos = QoSProfile(
+        qos  = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        sub = node.create_subscription(
+        node.create_subscription(
             PointCloud2, "/unilidar/cloud",
             lambda msg: received.set(), qos)
 
@@ -161,29 +180,32 @@ def check_lidar() -> bool:
         spin_thread.start()
 
         result = received.wait(timeout=8.0)
-
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
         if result:
             log("[OK] LiDAR healthy -- /unilidar/cloud publishing")
-            return True
         else:
             log("[WARN] LiDAR device found but no data within 8s")
-            log("       Point-LIO may not be running yet")
-            log("       Proceeding -- Point-LIO will start with scan")
-            return True   # device present, proceed with launch
+            log("       Point-LIO not yet running -- will start with scan")
+        return True   # device present in both cases; proceed with launch
 
     except Exception as e:
         log(f"[WARN] Could not verify LiDAR topic: {e}")
         log("       Proceeding since device is present")
         return True
 
-# ── MAVROS state monitor ──────────────────────────────────────────────────────
+
+# ── MAVROS State Monitor ──────────────────────────────────────────────────────
 
 class StateMonitor:
-    """Lightweight MAVROS state subscriber for monitoring only."""
+    """Lightweight MAVROS state subscriber.
+
+    Owns the single rclpy context for this process. Other components
+    that need to subscribe to ROS topics must reuse this node via
+    add_subscription() rather than calling rclpy.init() themselves.
+    """
 
     def __init__(self):
         import rclpy
@@ -193,15 +215,24 @@ class StateMonitor:
         self._lock  = threading.Lock()
         self._armed = False
         self._mode  = ""
+        self._rclpy = rclpy
 
         rclpy.init()
         self._node = Node("manual_scan_monitor")
         self._node.create_subscription(
             State, "/mavros/state", self._cb, 10)
+
         self._thread = threading.Thread(
             target=rclpy.spin, args=(self._node,), daemon=True)
         self._thread.start()
-        self._rclpy = rclpy
+
+    def add_subscription(self, msg_type, topic: str, callback, qos):
+        """Add a subscription to this node from any thread.
+
+        Use this instead of creating a separate rclpy node, since only
+        one rclpy context is permitted per process.
+        """
+        self._node.create_subscription(msg_type, topic, callback, qos)
 
     def _cb(self, msg):
         with self._lock:
@@ -210,26 +241,92 @@ class StateMonitor:
 
     @property
     def armed(self) -> bool:
-        with self._lock: return self._armed
+        with self._lock:
+            return self._armed
 
     @property
     def mode(self) -> str:
-        with self._lock: return self._mode
+        with self._lock:
+            return self._mode
 
     def shutdown(self):
+        self._node.destroy_node()
         if self._rclpy.ok():
             self._rclpy.shutdown()
 
-# ── main ──────────────────────────────────────────────────────────────────────
+
+# ── Point-LIO Readiness Check ─────────────────────────────────────────────────
+
+def wait_for_cloud_registered(
+        monitor: StateMonitor,
+        timeout: float = POINTLIO_TIMEOUT_S) -> bool:
+    """Block until /cloud_registered publishes or timeout expires.
+
+    Reuses the StateMonitor's existing rclpy node to avoid creating a
+    second rclpy context, which is not permitted within a single process.
+
+    Returns True if data arrived within timeout, False otherwise.
+    The bag recorder must only be started after this function returns,
+    ensuring bags always contain /cloud_registered point cloud data.
+    """
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+    from sensor_msgs.msg import PointCloud2
+
+    received = threading.Event()
+
+    qos = QoSProfile(
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+    )
+    monitor.add_subscription(
+        PointCloud2, "/cloud_registered",
+        lambda msg: received.set(), qos
+    )
+
+    t0       = time.time()
+    last_log = -1
+
+    while not received.is_set():
+        elapsed = time.time() - t0
+
+        if elapsed >= timeout:
+            log(f"[WARN] /cloud_registered not seen after {timeout:.0f}s")
+            log("       Point-LIO may still be initialising -- starting bag anyway")
+            return False
+
+        tick = int(elapsed) // 5
+        if tick != last_log and int(elapsed) > 0:
+            log(f"Waiting for /cloud_registered... ({elapsed:.0f}s / {timeout:.0f}s)")
+            last_log = tick
+
+        time.sleep(0.5)
+
+    log(f"/cloud_registered confirmed ({time.time() - t0:.1f}s after launch)")
+    return True
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description="Manual flight with on-demand LiDAR scanning.")
     parser.add_argument("--skip-lidar-check", action="store_true",
                         help="Skip LiDAR health check")
+    parser.add_argument("--no-disarm-stop",   action="store_true",
+                        help=(
+                            "Disable auto-stop on disarm. "
+                            "Writes bench_scan lock so watchdog yields entirely. "
+                            "Use for indoor bench testing only."
+                        ))
     parser.add_argument("--no-postflight",    action="store_true",
                         help="Skip postflight processing")
     args = parser.parse_args()
+
+    # Lock mode depends on whether we are bench testing or flying for real.
+    # bench_scan → watchdog yields entirely (same behaviour as autonomous).
+    # manual_scan → watchdog monitors for disarm and triggers post-flight.
+    lock_mode = "bench_scan" if args.no_disarm_stop else "manual_scan"
 
     print("\n" + "=" * 55)
     print("  DronePi Manual Scan")
@@ -238,9 +335,12 @@ def main():
     print("  No OFFBOARD mode required.")
     print("  No GPS lock required.")
     print("  Fly in STABILIZED / ALTCTL / POSCTL.")
+    if args.no_disarm_stop:
+        print("  [BENCH MODE] Disarm auto-stop disabled.")
+        print("  [BENCH MODE] Watchdog will yield (bench_scan lock).")
     print()
 
-    # ── check LiDAR ──────────────────────────────────────────────────────────
+    # ── Check LiDAR ──────────────────────────────────────────────────────────
     if not args.skip_lidar_check:
         if not check_lidar():
             log("LiDAR check failed -- fix and retry")
@@ -251,16 +351,16 @@ def main():
             sys.exit(1)
         log("LiDAR check skipped (--skip-lidar-check)")
 
-    # ── check SSD ────────────────────────────────────────────────────────────
+    # ── Check SSD ────────────────────────────────────────────────────────────
     if not ROSBAG_DIR.exists():
         log("[FAIL] /mnt/ssd/rosbags not found -- SSD not mounted")
         log("       Run: sudo mount -a")
         sys.exit(1)
 
-    # ── write manual_scan lock so watchdog stays out of the way ──────────────
-    # The watchdog will see this lock and skip its own launch.
-    # It will still monitor for disarm and run postflight when done.
-    write_lock("manual_scan")
+    # ── Write mission lock ────────────────────────────────────────────────────
+    # bench_scan → watchdog yields (no stack conflict)
+    # manual_scan → watchdog monitors disarm + post-flight for real flights
+    write_lock(lock_mode)
 
     pointlio_proc = None
     bag_proc      = None
@@ -289,7 +389,7 @@ def main():
     signal.signal(signal.SIGINT,  _sighandler)
     signal.signal(signal.SIGTERM, _sighandler)
 
-    # ── start MAVROS state monitor ────────────────────────────────────────────
+    # ── Start MAVROS state monitor (owns the rclpy context) ──────────────────
     try:
         monitor = StateMonitor()
         log(f"MAVROS monitor active -- mode={monitor.mode}  armed={monitor.armed}")
@@ -298,7 +398,7 @@ def main():
         log("       Proceeding without arm/mode monitoring")
         monitor = None
 
-    # ── wait for operator to start scan ──────────────────────────────────────
+    # ── Wait for operator to start scan ──────────────────────────────────────
     print()
     print("  Ready to scan.")
     print("  Press Enter to START Point-LIO and bag recording.")
@@ -311,10 +411,10 @@ def main():
         clear_lock()
         sys.exit(0)
 
-    # ── launch Point-LIO ──────────────────────────────────────────────────────
-    ts            = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bag_dir       = str(ROSBAG_DIR / f"scan_{ts}")
-    pointlio_cmd  = (
+    # ── Launch Point-LIO ──────────────────────────────────────────────────────
+    scan_ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bag_dir      = str(ROSBAG_DIR / f"scan_{scan_ts}")
+    pointlio_cmd = (
         f"source {ROS_SETUP} && source {WS_SETUP} && "
         f"ros2 launch {LAUNCH_FILE} rviz:=false port:=/dev/ttyUSB0"
     )
@@ -327,8 +427,15 @@ def main():
     )
 
     pointlio_proc = start_proc("Point-LIO", pointlio_cmd)
-    log(f"Waiting {POINTLIO_INIT_S}s for Point-LIO to initialize...")
-    time.sleep(POINTLIO_INIT_S)
+
+    # Wait for SLAM output before starting the bag recorder.
+    # Reuses the StateMonitor node to avoid a second rclpy.init() call.
+    log("Waiting for Point-LIO to publish /cloud_registered before starting bag...")
+    if monitor:
+        wait_for_cloud_registered(monitor)
+    else:
+        log("[WARN] No monitor node available -- falling back to 15s fixed wait")
+        time.sleep(15.0)
 
     bag_proc = start_proc("Bag recorder", bag_cmd)
     log(f"Bag recording to: {bag_dir}")
@@ -341,7 +448,7 @@ def main():
     print("  ╚══════════════════════════════════════════╝")
     print()
 
-    # ── monitor while scanning ────────────────────────────────────────────────
+    # ── Monitor while scanning ────────────────────────────────────────────────
     stop_event = threading.Event()
 
     def _status_thread():
@@ -356,11 +463,12 @@ def main():
     status_t = threading.Thread(target=_status_thread, daemon=True)
     status_t.start()
 
-    # Wait for Enter or auto-stop on disarm
+    # Wait for Enter or auto-stop on disarm.
+    # Disarm detection is disabled in bench mode (--no-disarm-stop).
     stop_reason = "operator"
     try:
-        # Run input in a thread so we can also detect disarm
         entered = threading.Event()
+
         def _wait_input():
             try:
                 input()
@@ -372,8 +480,10 @@ def main():
         input_t.start()
 
         while not entered.is_set():
-            # Auto-stop if drone disarms (landed)
-            if monitor and not monitor.armed and monitor.mode != "":
+            if (not args.no_disarm_stop
+                    and monitor
+                    and not monitor.armed
+                    and monitor.mode != ""):
                 # Give 3s grace period in case of brief disarm
                 time.sleep(3.0)
                 if not monitor.armed:
@@ -388,7 +498,7 @@ def main():
     stop_event.set()
     print()
 
-    # ── stop stack ────────────────────────────────────────────────────────────
+    # ── Stop stack ────────────────────────────────────────────────────────────
     log(f"Stopping scan ({stop_reason})...")
     stop_proc("Bag recorder", bag_proc)
     bag_proc = None
@@ -405,7 +515,7 @@ def main():
     print(f"  Bag saved: {bag_dir}")
     print("=" * 55)
 
-    # ── postflight ────────────────────────────────────────────────────────────
+    # ── Postflight ────────────────────────────────────────────────────────────
     if not args.no_postflight:
         print()
         log("Running postflight processing...")

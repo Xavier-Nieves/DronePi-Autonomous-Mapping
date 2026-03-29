@@ -6,7 +6,8 @@ Description=DronePi Flight Stack Watchdog (Point-LIO + bag recorder)
 # service fails to start or crashes unrecoverably, main.py will also be stopped
 # by systemd — the correct fail-safe when the bag/postflight supervisor is gone.
 After=mavros.service mnt-ssd.mount dronepi-hotspot.service
-Wants=mavros.service mnt-ssd.mount dronepi-hotspot.service
+Requires=mavros.service
+Wants=mnt-ssd.mount dronepi-hotspot.service
 
 [Service]
 Type=simple

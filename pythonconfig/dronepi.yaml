@@ -1,0 +1,30 @@
+# dronepi.yaml — Single source of truth for all runtime constants.
+# Edit here; restart services to pick up changes.
+
+# ── Collision monitor (collision_monitor.py) ──────────────────────────────────
+collision:
+  ignore_radius:   0.70
+  obstacle_radius: 2.00
+  caution_radius:  3.50
+  down_cone_deg:   30.0
+  down_max_m:      15.0
+  down_min_points: 10
+  publish_hz:      10
+  down_fov_deg:    15.0 
+
+# ── Mesh pipeline (postprocess_mesh.py) ───────────────────────────────────────
+mesh:
+  cloud_cap_rate:       1500    # points per second, standard mode
+  cloud_cap_max:        500000  # absolute point cap, standard mode
+  cloud_cap_rate_fast:  800     # points per second, fast mode
+  cloud_cap_max_fast:   150000  # absolute point cap, fast mode
+
+# ── HTTP server (rpi_server/serve.py) ─────────────────────────────────────────
+server:
+  port:      8080
+  bind_addr: "0.0.0.0"
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  maps_dir:    "/mnt/ssd/maps"
+  rosbags_dir: "/mnt/ssd/rosbags"

@@ -64,18 +64,23 @@ from mesh_tools.publisher         import Publisher
 
 from debugger_tools import DebugSaver, PipelineStage, write_failure_status
 
-# ── Config ────────────────────────────────────────────────────────────────────
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parents[2]))
+from pythonconfig.config_loader import load_config as _load_config
 
-_MNT_MAPS   = Path("/mnt/ssd/maps")
-_MNT_ROSBAG = Path("/mnt/ssd/rosbags")
+# ── Config ────────────────────────────────────────────────────────────────────
+_cfg = _load_config()
+
+_MNT_MAPS   = Path(_cfg["paths"]["maps_dir"])
+_MNT_ROSBAG = Path(_cfg["paths"]["rosbags_dir"])
 
 MAPS_DIR   = _MNT_MAPS   if _MNT_MAPS.exists()   else None
 ROSBAG_DIR = _MNT_ROSBAG if _MNT_ROSBAG.exists() else None
 
-CLOUD_CAP_RATE      = 1500
-CLOUD_CAP_MAX       = 500_000
-CLOUD_CAP_RATE_FAST = 800
-CLOUD_CAP_MAX_FAST  = 150_000
+CLOUD_CAP_RATE      = _cfg["mesh"]["cloud_cap_rate"]
+CLOUD_CAP_MAX       = _cfg["mesh"]["cloud_cap_max"]
+CLOUD_CAP_RATE_FAST = _cfg["mesh"]["cloud_cap_rate_fast"]
+CLOUD_CAP_MAX_FAST  = _cfg["mesh"]["cloud_cap_max_fast"]
 
 
 # ── Poisson (optional legacy path) ────────────────────────────────────────────

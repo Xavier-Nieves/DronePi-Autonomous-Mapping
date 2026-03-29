@@ -7,7 +7,7 @@ services:
     build:
       context: ..
       dockerfile: docker/lidar/Dockerfile
-    image: unitree-l1-lidar:ros2-humble
+    image: unitree-l1-lidar:ros2-jazzy
     container_name: lidar_container
     privileged: true
     network_mode: host  # ROS2 DDS communication across containers
@@ -32,7 +32,7 @@ services:
     build:
       context: ..
       dockerfile: docker/mavros/Dockerfile
-    image: mavros-px4:ros2-humble
+    image: mavros-px4:ros2-jazzy
     container_name: mavros_container
     privileged: true
     network_mode: host  # ROS2 DDS communication across containers

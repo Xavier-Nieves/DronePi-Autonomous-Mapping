@@ -47,6 +47,8 @@ import math
 import struct
 import threading
 import time
+import sys as _sys
+import math as _math
 
 import numpy as np
 import rclpy
@@ -58,30 +60,37 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parents[2]))
+
+from pythonconfig.config_loader import load_config as _load_config
+
+
 from sensor_msgs.msg import PointCloud2, Range, LaserScan
 from std_msgs.msg import String
 
-# ── Zone Radii (metres) — based on physical drone measurements ────────────────
+# ── Zone Radii and tuning — loaded from config/dronepi.yaml ──────────────────
+_cfg = _load_config()
 
-IGNORE_RADIUS   = 0.70   # Leg tip (0.50 m) + position drift margin (0.20 m)
-OBSTACLE_RADIUS = 2.00   # Prop tip (0.66 m) + 1.34 m braking distance
-CAUTION_RADIUS  = 3.50   # Outer early-warning ring
+IGNORE_RADIUS   = _cfg["collision"]["ignore_radius"]
+OBSTACLE_RADIUS = _cfg["collision"]["obstacle_radius"]
+CAUTION_RADIUS  = _cfg["collision"]["caution_radius"]
 
 # ── Downward Height Estimator ─────────────────────────────────────────────────
 
-DOWN_CONE_DEG   = 30.0          # Half-angle of downward extraction cone (degrees)
-DOWN_MAX_M      = 15.0          # Maximum believable ground distance (metres)
-DOWN_MIN_POINTS = 10            # Minimum in-cone returns before publishing AGL
-DOWN_FOV_RAD    = math.radians(15.0)  # Beam spread reported to PX4
+DOWN_CONE_DEG   = _cfg["collision"]["down_cone_deg"]                # Half-angle of downward extraction cone (degrees)
+DOWN_MAX_M      = _cfg["collision"]["down_max_m"]                   # Maximum believable ground distance (metres)
+DOWN_MIN_POINTS = _cfg["collision"]["down_min_points"]              # Minimum in-cone returns before publishing AGL
+DOWN_FOV_RAD    = math.radians(_cfg["collision"]["down_fov_deg"])   # Beam spread reported to PX4
+
 
 # ── Publish Rate and Sector Config ────────────────────────────────────────────
 # MAVROS obstacle_distance plugin accepts sensor_msgs/LaserScan on
 # /mavros/obstacle/send and converts it to MAVLink OBSTACLE_DISTANCE for PX4.
 # LaserScan convention: angle_min = -pi, angle_max = pi, 72 beams = 5 deg each.
 
-PUBLISH_HZ  = 10
+PUBLISH_HZ  = _cfg["collision"]["publish_hz"]
 NUM_SECTORS = 72
-import math as _math
 SECTOR_RAD  = (2.0 * _math.pi) / NUM_SECTORS   # ~0.0873 rad per sector
 
 # ── QoS Profiles ─────────────────────────────────────────────────────────────

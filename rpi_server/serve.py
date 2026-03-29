@@ -33,13 +33,19 @@ import logging
 import re
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, HTTPServer
+import sys as _sys
+
+_sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from pythonconfig.config_loader import load_config as _load_config
+
 
 # ── config ────────────────────────────────────────────────────────────────────
+_cfg = _load_config()
 
-SERVE_DIR  = "/mnt/ssd/maps"
-ROSBAG_DIR = "/mnt/ssd/rosbags"
-PORT       = 8080
-BIND_ADDR  = "0.0.0.0"
+SERVE_DIR  = _cfg["paths"]["maps_dir"]
+ROSBAG_DIR = _cfg["paths"]["rosbags_dir"]
+PORT       = _cfg["server"]["port"]
+BIND_ADDR  = _cfg["server"]["bind_addr"]
 
 # Directory name pattern written by ros2 bag record:
 #   scan_YYYYMMDD_HHMMSS   e.g. scan_20260317_091400

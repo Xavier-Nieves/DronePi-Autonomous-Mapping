@@ -58,6 +58,7 @@ _DEFAULTS: dict = {
         "cloud_cap_max":       500_000,
         "cloud_cap_rate_fast": 800,
         "cloud_cap_max_fast":  150_000,
+        "min_points_to_process": 50000,
     },
     "server": {
         "port":      8080,

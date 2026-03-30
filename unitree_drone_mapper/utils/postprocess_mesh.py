@@ -44,6 +44,7 @@ Usage
 """
 
 import argparse
+import shutil
 import sys
 import time
 import traceback
@@ -208,6 +209,10 @@ def main():
                         help="Max bag frames to read")
     parser.add_argument("--auto", action="store_true",
                         help="Non-interactive mode (called by watchdog)")
+    parser.add_argument("--min-points", type=int, default=None,
+                        help="Minimum extracted point count to proceed. "
+                             "Overrides config.yaml mesh.min_points_to_process (default: 50000).")
+
     args = parser.parse_args()
 
     bag_path   = Path(args.bag)
@@ -266,6 +271,33 @@ def main():
         reader  = BagReader(bag_path, max_frames=args.max_frames)
         pts_raw = reader.extract()
         meta    = reader.metadata
+        
+        # ── Minimum-points guard ──────────────────────────────────────────
+        # Threshold resolution priority:
+        #   1. --min-points CLI argument (per-run override)
+        #   2. config.yaml  mesh.min_points_to_process
+        #   3. Hard fallback of 50 000 (covers old yaml missing the key)
+        _cfg_threshold: int = _cfg.get("mesh", {}).get("min_points_to_process", 50_000)
+        min_pts: int = args.min_points if args.min_points is not None else _cfg_threshold
+
+        if len(pts_raw) < min_pts:
+            print(
+                f"\n[ABORT] Extraction yielded {len(pts_raw):,} points — "
+                f"below minimum threshold of {min_pts:,}.\n"
+                f"        Scan was too short or the bag contains no LiDAR data.\n"
+                f"        No output will be written.",
+                file=sys.stderr,
+            )
+            # Remove the output directory if pre-created to avoid leaving
+            # an empty folder on disk.
+            if maps_dir.exists() and not any(maps_dir.iterdir()):
+                shutil.rmtree(maps_dir)
+            # Exit 0: deliberate early termination, not a pipeline failure.
+            # Exit 1 would incorrectly trigger the watchdog error buzzer tone.
+            sys.exit(0)
+
+        print(f"  [Guard] {len(pts_raw):,} points ≥ threshold {min_pts:,} — proceeding.")
+        # ── End minimum-points guard ──────────────────────────────────────
 
         debug.save_cloud(pts_raw, "raw")
         debug.print_stats(pts_raw, "Raw Point Cloud")

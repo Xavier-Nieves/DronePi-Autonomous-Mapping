@@ -71,6 +71,7 @@ mesh:
   cloud_cap_max:        500000
   cloud_cap_rate_fast:  800
   cloud_cap_max_fast:   150000
+  min_points_to_process: 50000
 
 dsm:
   DEFAULT_MAX_PTS:       80000   

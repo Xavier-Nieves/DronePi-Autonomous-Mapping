@@ -52,6 +52,15 @@ Camera (MODE 3 only)
   If Picamera2 is unavailable (e.g. camera not connected), the mission
   continues without captures — camera failure is non-fatal.
 
+Buzzer (MODE 3 only)
+--------------------
+  MainNode.play_tune() publishes PlayTuneV2 to /mavros/play_tune, using the
+  same Pixhawk endpoint as the watchdog's MavrosReader. A ScanBeeper from
+  watchdog_core/buzzer.py runs throughout the autonomous mission, giving the
+  operator the same 1 Hz audio heartbeat as a manual scan. TUNE_SCAN_START
+  is played once at mission commitment; TUNE_SCAN_FINISHED is played when the
+  waypoint loop exits. All tones use QBASIC Format 1.
+
 Logging
 -------
   All output captured by journalctl:
@@ -91,11 +100,11 @@ CAMERA_SCRIPT       = FLIGHT_DIR / "camera_capture.py"
 POSTFLIGHT_SCRIPT   = UTILS_DIR  / "run_postflight.py"
 HAILO_FLIGHT_SCRIPT = PROJECT_ROOT / "hailo" / "hailo_flight_node.py"
 LIDAR_PORT          = Path("/dev/ttyUSB0")
-HAILO_DEVICE      = Path("/dev/hailo0")
-MISSION_LOCK      = Path("/tmp/dronepi_mission.lock")
-HAILO_LOCK        = Path("/tmp/dronepi_hailo.lock")
-ROSBAG_DIR        = Path("/mnt/ssd/rosbags")
-FLIGHT_IMG_DIR    = Path("/mnt/ssd/flights")
+HAILO_DEVICE        = Path("/dev/hailo0")
+MISSION_LOCK        = Path("/tmp/dronepi_mission.lock")
+HAILO_LOCK          = Path("/tmp/dronepi_hailo.lock")
+ROSBAG_DIR          = Path("/mnt/ssd/rosbags")
+FLIGHT_IMG_DIR      = Path("/mnt/ssd/flights")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -117,10 +126,10 @@ DEFAULT_MIN_DENS  = 5       # Minimum LiDAR points per grid cell before gap fill
 WP_TOLERANCE_M    = 0.5     # Waypoint arrival tolerance (metres)
 
 # SLAM chain verification — replaces fixed sleeps after process launch
-SLAM_TOPIC_TIMEOUT_S  = 30.0  # Max seconds to wait for /aft_mapped_to_init
-BRIDGE_TOPIC_TIMEOUT_S = 15.0 # Max seconds to wait for /mavros/vision_pose/pose
-SLAM_MIN_HZ           = 5.0   # Minimum acceptable publish rate (Hz) for SLAM topic
-BRIDGE_MIN_HZ         = 8.0   # Minimum acceptable publish rate (Hz) for vision pose
+SLAM_TOPIC_TIMEOUT_S   = 30.0  # Max seconds to wait for /aft_mapped_to_init
+BRIDGE_TOPIC_TIMEOUT_S = 15.0  # Max seconds to wait for /mavros/vision_pose/pose
+SLAM_MIN_HZ            = 5.0   # Minimum acceptable publish rate (Hz) for SLAM topic
+BRIDGE_MIN_HZ          = 8.0   # Minimum acceptable publish rate (Hz) for vision pose
 
 # Hailo in-flight integration
 HAILO_STARTUP_TIMEOUT_S = 20.0  # Max seconds to wait for Hailo node to publish
@@ -152,9 +161,9 @@ BAG_TOPICS = [
     "/mavros/local_position/pose",
     "/mavros/global_position/global",
     "/mavros/distance_sensor/lidar_down",
-    "/mavros/vision_pose/pose",       # SLAM bridge output — EKF2 fusion input
-    "/hailo/optical_flow",            # Hailo velocity output — logged when active
-    "/hailo/ground_class",            # Hailo ground classifier — logged when active
+    "/mavros/vision_pose/pose",
+    "/hailo/optical_flow",
+    "/hailo/ground_class",
 ]
 
 # ── Flight Modes ──────────────────────────────────────────────────────────────
@@ -176,7 +185,6 @@ def log(msg: str) -> None:
 def log_mode(mode: FlightMode, detail: str = "") -> None:
     sep = f"  {detail}" if detail else ""
     log(f"[{mode.value}]{sep}")
-
 
 # ── Background Setpoint Streamer ─────────────────────────────────────────────
 
@@ -231,7 +239,7 @@ class SetpointStreamer:
             time.sleep(interval)
 
 
-# ── Main Status Writer ───────────────────────────────────────────────────────
+# ── Main Status Writer ────────────────────────────────────────────────────────
 # main.py does NOT touch GPIO. It writes system status to /tmp/main_status.json.
 # led_service.py observes this file (and watchdog_status.json + mission lock)
 # and derives the correct LED state autonomously.
@@ -266,10 +274,10 @@ def _write_main_status(
     """
     try:
         payload = json.dumps({
-            "ts":            time.time(),
-            "hailo_active":  hailo_active,
-            "hailo_degraded":hailo_degraded,
-            "hailo_failed":  hailo_failed,
+            "ts":             time.time(),
+            "hailo_active":   hailo_active,
+            "hailo_degraded": hailo_degraded,
+            "hailo_failed":   hailo_failed,
         })
         with open(_MAIN_STATUS_FILE_TMP, "w") as f:
             f.write(payload)
@@ -364,8 +372,8 @@ class MainNode:
     """Minimal ROS 2 node shared across all flight mode handlers.
 
     Provides thread-safe access to drone state, position, home position,
-    GPS fix, and QGC waypoints. Also implements setpoint publishing and
-    mode switching for use during MODE 3 autonomous execution.
+    GPS fix, and QGC waypoints. Also implements setpoint publishing, mode
+    switching, and buzzer output for use during MODE 3 autonomous execution.
     """
 
     def __init__(self):
@@ -387,15 +395,20 @@ class MainNode:
         self._PS    = PoseStamped
         self._lock  = threading.Lock()
 
-        self._state          = State()
-        self._pose           = None
-        self._home           = None
-        self._waypoints      = []
-        self._gps_fix        = None   # sensor_msgs/NavSatFix — live GPS position
-        self._collision_zone = "CLEAR"
-        self.vision_pose_received  = False
-        self._vision_pose_stamp    = None  # rclpy.time.Time of last vision pose msg
-        self.hailo_active          = False  # True once Hailo flight node is publishing
+        self._state              = State()
+        self._pose               = None
+        self._home               = None
+        self._waypoints          = []
+        self._gps_fix            = None
+        self._collision_zone     = "CLEAR"
+        self.vision_pose_received = False
+        self._vision_pose_stamp  = None
+        self.hailo_active        = False
+
+        # Buzzer publisher — created lazily on first play_tune() call.
+        # Lazy init avoids a startup failure if mavros_msgs is not yet
+        # available when the node is constructed before MAVROS is ready.
+        self._tune_pub = None
 
         rclpy.init()
         self._node = Node("dronepi_main")
@@ -430,14 +443,10 @@ class MainNode:
             PoseStamped,
             "/mavros/vision_pose/pose",
             self._vision_cb, reliable_qos)
-
-        # Live GPS position — used for camera sidecar metadata
         self._node.create_subscription(
             NavSatFix,
             "/mavros/global_position/global",
             self._gps_cb, sensor_qos)
-
-        # Hailo in-flight topics — optional, non-fatal if not publishing
         self._node.create_subscription(
             TwistStamped,
             HAILO_FLOW_TOPIC,
@@ -605,6 +614,36 @@ class MainNode:
         print()
         return False
 
+    # ── Buzzer ────────────────────────────────────────────────────────────────
+
+    def play_tune(self, tune: str) -> None:
+        """Publish a QBASIC Format 1 tune to the Pixhawk buzzer via MAVROS.
+
+        Uses the same /mavros/play_tune topic and PlayTuneV2 message as
+        MavrosReader.play_tune() in the watchdog — both processes share the
+        same Pixhawk subscriber and can drive the buzzer independently.
+
+        The publisher is created lazily on first call so construction of
+        MainNode never fails even if mavros_msgs is not yet resolvable.
+
+        Parameters
+        ----------
+        tune : str
+            QBASIC Format 1 string (e.g. from watchdog_core/buzzer.py constants).
+        """
+        try:
+            from mavros_msgs.msg import PlayTuneV2
+            if self._tune_pub is None:
+                self._tune_pub = self._node.create_publisher(
+                    PlayTuneV2, "/mavros/play_tune", 10
+                )
+            msg        = PlayTuneV2()
+            msg.format = 1
+            msg.tune   = tune
+            self._tune_pub.publish(msg)
+        except Exception as exc:
+            log(f"[BUZZER] play_tune failed: {exc}")
+
     # ── Mode Control ──────────────────────────────────────────────────────────
 
     def set_mode(self, mode: str) -> bool:
@@ -687,10 +726,8 @@ def run_preflight_checks(node: MainNode) -> bool:
         all_pass = False
 
     # 2 — GPS / home position — WARN only, non-blocking
-    # GPS is not the primary position source (EKF2_GPS_CTRL=0 or 1).
-    # SLAM provides position. GPS coordinates are logged for geotagging only.
     log("[CHECK 2/7] Checking GPS home position (non-blocking)...")
-    deadline = time.time() + min(HOME_TIMEOUT, 10.0)  # shorter wait — it's a WARN
+    deadline = time.time() + min(HOME_TIMEOUT, 10.0)
     while time.time() < deadline:
         if node.get_home() is not None:
             break
@@ -764,15 +801,10 @@ def run_preflight_checks(node: MainNode) -> bool:
         log("            Upload a survey mission in QGC first")
         all_pass = False
 
-    # 7 — SLAM bridge vision pose — rate-verified with fast path
-    # If pointlio-standby.service had Point-LIO running before arm,
-    # the vision pose topic will already be publishing. The fast path
-    # (2s window) catches this case and skips the 30s Point-LIO wait.
-    # If Point-LIO is not yet running, falls through to the full wait.
+    # 7 — SLAM bridge vision pose
     log("[CHECK 7/7] Verifying SLAM chain...")
     slam_ok = False
 
-    # Fast path — covers pre-arm standby case and already-running bridge
     age = node.vision_pose_age_sec()
     if age < 1.0:
         log(f"[CHECK 7/7] Vision pose fresh (age={age:.2f}s) — verifying rate...")
@@ -780,7 +812,6 @@ def run_preflight_checks(node: MainNode) -> bool:
             "/mavros/vision_pose/pose", BRIDGE_MIN_HZ, 2.0
         )
     else:
-        # Check if Point-LIO is up but bridge not yet started
         lio_pre = _wait_for_topic_hz("/aft_mapped_to_init", SLAM_MIN_HZ, 2.0)
         if lio_pre:
             log("[CHECK 7/7] Point-LIO pre-running — checking SLAM bridge rate...")
@@ -788,7 +819,6 @@ def run_preflight_checks(node: MainNode) -> bool:
                 "/mavros/vision_pose/pose", BRIDGE_MIN_HZ, BRIDGE_TOPIC_TIMEOUT_S
             )
         else:
-            # Full wait — neither Point-LIO nor bridge are running yet
             log("[CHECK 7/7] Waiting for Point-LIO /aft_mapped_to_init "
                 f"(up to {SLAM_TOPIC_TIMEOUT_S:.0f}s)...")
             lio_ok = _wait_for_topic_hz(
@@ -824,14 +854,10 @@ def run_preflight_checks(node: MainNode) -> bool:
 # ── Camera Helpers ────────────────────────────────────────────────────────────
 
 def _start_camera(session_id: str):
-    """Import and start CameraCapture.  Returns instance or None if unavailable.
-
-    Camera failure is non-fatal — the mission proceeds without captures.
-    A None return value is handled gracefully at every call site.
-    """
+    """Import and start CameraCapture. Returns instance or None if unavailable."""
     try:
         sys.path.insert(0, str(FLIGHT_DIR))
-        from camera_capture import CameraCapture
+        from flight.camera_capture import CameraCapture
         cam = CameraCapture(session_id=session_id)
         ok  = cam.start()
         if ok:
@@ -859,19 +885,7 @@ def _stop_camera(cam) -> None:
 
 
 def _trigger_camera(cam, waypoint_index: int, enu: tuple, node: MainNode) -> None:
-    """Fire one camera trigger at waypoint arrival.
-
-    Builds the metadata context dict from current node state and posts it
-    to CameraCapture.trigger().  Runs synchronously — trigger() returns
-    within ~25ms (one frame period at 40fps).
-
-    Parameters
-    ----------
-    cam           : CameraCapture instance or None
-    waypoint_index: zero-based index into the mission waypoint list
-    enu           : (east, north, up) metres — current waypoint ENU coords
-    node          : MainNode — provides live GPS fix for sidecar metadata
-    """
+    """Fire one camera trigger at waypoint arrival."""
     if cam is None:
         return
 
@@ -942,9 +956,34 @@ def handle_autonomous(node: MainNode) -> None:
         8. AUTO.RTL on mission complete.
         9. Wait for disarm, then tear down all processes and camera.
 
+    Buzzer:
+        ScanBeeper (from watchdog_core/buzzer.py) runs throughout the mission
+        via node.play_tune(), giving the same 1 Hz audio heartbeat as a manual
+        scan. TUNE_SCAN_START fires once at mission commitment.
+        TUNE_SCAN_FINISHED fires on all exit paths (normal, abort, disarm).
+
     Args:
         node: MainNode — shared ROS 2 node.
     """
+    # Import buzzer tones and ScanBeeper from the watchdog_core package.
+    # These are available in the dronepi conda env alongside the rest of the stack.
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "flight"))
+        from flight.watchdog_core.buzzer import (
+            ScanBeeper,
+            TUNE_SCAN_START,
+            TUNE_SCAN_FINISHED,
+        )
+        _buzzer_available = True
+    except ImportError as exc:
+        log(f"[BUZZER] watchdog_core.buzzer not importable: {exc} — running silent")
+        _buzzer_available = False
+
+    def _play(tune: str) -> None:
+        """Play a tune via node, only when buzzer is available."""
+        if _buzzer_available:
+            node.play_tune(tune)
+
     log_mode(FlightMode.AUTONOMOUS, "Starting autonomous survey mission")
 
     if not run_preflight_checks(node):
@@ -955,18 +994,45 @@ def handle_autonomous(node: MainNode) -> None:
 
     write_lock("autonomous")
 
+    # Initialise ScanBeeper before the stack launches so it is ready to start
+    # the moment the mission is committed (after pre-stream setpoints).
+    scan_beeper = (
+        ScanBeeper(play_tune_fn=node.play_tune) if _buzzer_available else None
+    )
+
+    # ── Teardown helper — called on every exit path ────────────────────────────
+    # Defined here so every return statement can call a single function rather
+    # than duplicating the stop_proc sequence, which previously meant buzzer
+    # stop calls were easy to miss on early-exit paths.
+    def _teardown(
+        bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam
+    ) -> None:
+        if scan_beeper is not None:
+            scan_beeper.stop()
+        _play(TUNE_SCAN_FINISHED if _buzzer_available else "")
+        log("[BUZZER] autonomous scan_finished")
+        _stop_camera(cam)
+        stop_proc("Bag recorder",      bag_proc)
+        stop_proc("Collision monitor", collision_proc)
+        stop_proc("SLAM bridge",       bridge_proc)
+        stop_proc("Point-LIO",         pointlio_proc)
+        if hailo_proc:
+            stop_proc("Hailo flight node", hailo_proc)
+            HAILO_LOCK.unlink(missing_ok=True)
+
     # ── 3. Launch Flight Stack ────────────────────────────────────────────────
     pointlio_proc = start_proc(
         "Point-LIO",
         f"source {ROS_SETUP} && source {WS_SETUP} && "
         f"ros2 launch {LAUNCH_FILE} rviz:=false port:=/dev/ttyUSB0",
     )
-    # Verify Point-LIO is actually publishing — not a fixed sleep
     log("Waiting for Point-LIO /aft_mapped_to_init ...")
     if not _wait_for_topic_hz("/aft_mapped_to_init", SLAM_MIN_HZ, SLAM_TOPIC_TIMEOUT_S):
         log("[FAIL] Point-LIO did not publish within timeout — aborting mission")
         stop_proc("Point-LIO", pointlio_proc)
         clear_lock()
+        if scan_beeper is not None:
+            scan_beeper.stop()
         while node.armed:
             time.sleep(0.5)
         return
@@ -976,23 +1042,20 @@ def handle_autonomous(node: MainNode) -> None:
         f"source {ROS_SETUP} && source {WS_SETUP} && "
         f"python3 {BRIDGE_SCRIPT}",
     )
-    # Verify bridge is forwarding to MAVROS — not a fixed sleep
     log("Waiting for SLAM bridge /mavros/vision_pose/pose ...")
     if not _wait_for_topic_hz("/mavros/vision_pose/pose", BRIDGE_MIN_HZ, BRIDGE_TOPIC_TIMEOUT_S):
         log("[FAIL] SLAM bridge did not publish vision pose within timeout — aborting mission")
         stop_proc("SLAM bridge",  bridge_proc)
         stop_proc("Point-LIO",    pointlio_proc)
         clear_lock()
+        if scan_beeper is not None:
+            scan_beeper.stop()
         while node.armed:
             time.sleep(0.5)
         return
     log("SLAM chain verified — EKF2 has a valid position source")
 
     # ── 3b. Launch Hailo Flight Node (non-fatal) ──────────────────────────────
-    # Runs in hailo_inference_env — separate Python env from the Conda stack.
-    # Publishes /hailo/optical_flow and /hailo/ground_class via ROS 2 IPC.
-    # If /dev/hailo0 is absent or the node fails to start, flight continues
-    # without Hailo — optical flow velocity augmentation is degraded gracefully.
     hailo_proc = None
     if HAILO_DEVICE.exists() and HAILO_FLIGHT_SCRIPT.exists():
         hailo_proc = start_proc(
@@ -1027,8 +1090,8 @@ def handle_autonomous(node: MainNode) -> None:
     else:
         log("[WARN] collision_monitor.py not found — obstacle avoidance disabled")
 
-    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bag_out = ROSBAG_DIR / f"scan_{ts}"
+    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bag_out  = ROSBAG_DIR / f"scan_{ts}"
     bag_proc = start_proc(
         "Bag recorder",
         f"source {ROS_SETUP} && source {WS_SETUP} && "
@@ -1037,16 +1100,13 @@ def handle_autonomous(node: MainNode) -> None:
     log("Flight stack running")
 
     # ── 3c. Wire FlowBridge into MainNode ─────────────────────────────────────
-    # FlowBridge subscribes to /hailo/optical_flow and forwards velocity to
-    # /mavros/odometry/out for EKF2 fusion. Only active if Hailo node is up.
     flow_bridge = None
     if hailo_proc is not None:
         try:
             sys.path.insert(0, str(FLIGHT_DIR))
-            from _flow_bridge import FlowBridge
+            from flight._flow_bridge import FlowBridge
 
             def _on_flow_degraded():
-                """Called by FlowBridge after FALLBACK_ESCALATE_COUNT rejections."""
                 log("[HAILO] Flow bridge degraded — consecutive rejections exceeded threshold")
                 _write_main_status(hailo_active=True, hailo_degraded=True)
 
@@ -1059,10 +1119,8 @@ def handle_autonomous(node: MainNode) -> None:
             log(f"[WARN] FlowBridge failed to initialise: {exc} — velocity augmentation disabled")
 
     # ── 4. Start Camera ───────────────────────────────────────────────────────
-    # Session ID matches the bag timestamp so images and bag align by name.
     cam = _start_camera(f"scan_{ts}")
     if cam is not None:
-        # Allow AEC/AWB to converge while we load waypoints
         log(f"[CAM] Waiting {CAMERA_INIT_S}s for AEC/AWB convergence...")
         time.sleep(CAMERA_INIT_S)
 
@@ -1102,6 +1160,8 @@ def handle_autonomous(node: MainNode) -> None:
         while node.armed:
             time.sleep(0.5)
 
+        _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam)
+
         _stop_camera(cam)
         stop_proc("Bag recorder",      bag_proc)
         stop_proc("Collision monitor", collision_proc)
@@ -1127,12 +1187,18 @@ def handle_autonomous(node: MainNode) -> None:
     log("Pre-streaming setpoints (3 s)...")
     node.stream_sp(hx, hy, hz, 0.0, 3.0)
 
+    # ── Start scan beeper — mission is now committed ──────────────────────────
+    _play(TUNE_SCAN_START)
+    log("[BUZZER] autonomous scan_start")
+    if scan_beeper is not None:
+        scan_beeper.start()
+
     # ── 6. Initialise Gap Detector ────────────────────────────────────────────
     gap_fill_enabled = False
     gap_det = None
     try:
         sys.path.insert(0, str(FLIGHT_DIR))
-        from gap_detector import GapDetector
+        from flight.gap_detector import GapDetector
 
         fov_half    = math.radians(DEFAULT_FOV_DEG / 2.0)
         alt         = enu_wps[0][2] if enu_wps else 10.0
@@ -1163,18 +1229,11 @@ def handle_autonomous(node: MainNode) -> None:
 
             elapsed = time.time() - offboard_lost_at
             if elapsed > OFFBOARD_RESUME_S:
-                log(f"[MODE 3] OFFBOARD not restored — switching to AUTO.RTL")
+                log("[MODE 3] OFFBOARD not restored — switching to AUTO.RTL")
                 node.set_mode("AUTO.RTL")
                 while node.armed:
                     time.sleep(0.5)
-                _stop_camera(cam)
-                stop_proc("Bag recorder",      bag_proc)
-                stop_proc("Collision monitor", collision_proc)
-                stop_proc("SLAM bridge",       bridge_proc)
-                stop_proc("Point-LIO",         pointlio_proc)
-                if hailo_proc:
-                    stop_proc("Hailo flight node", hailo_proc)
-                    HAILO_LOCK.unlink(missing_ok=True)
+                _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam)
                 return
             time.sleep(0.5)
 
@@ -1186,13 +1245,11 @@ def handle_autonomous(node: MainNode) -> None:
             log("[MODE 3] Disarmed mid-mission — stopping")
             break
 
-        # ── Hailo health check per waypoint ───────────────────────────────────
-        # Check if the Hailo node process exited unexpectedly between waypoints.
-        # This is a background process — it can crash without stopping the mission.
+        # Hailo health check per waypoint
         if hailo_proc is not None and hailo_proc.poll() is not None:
             log(f"[HAILO] Flight node exited unexpectedly "
                 f"(code: {hailo_proc.poll()}) — continuing without Hailo")
-            hailo_proc = None
+            hailo_proc  = None
             flow_bridge = None
             HAILO_LOCK.unlink(missing_ok=True)
             _write_main_status(hailo_failed=True)
@@ -1215,9 +1272,7 @@ def handle_autonomous(node: MainNode) -> None:
                     node.fly_to(gx, gy, ez, 0.0, timeout=60.0)
                     node.fly_to(ex, ey, ez, 0.0, timeout=60.0)
 
-        # ── Camera trigger — one capture per waypoint arrival ─────────────────
-        # Dwell at the waypoint for one stream cycle (50ms) before firing the
-        # trigger so the frame is captured with the drone stationary.
+        # Camera trigger — dwell one cycle before capture so drone is stationary
         node.stream_sp(ex, ey, ez, 0.0, 0.05)
         _trigger_camera(cam, i, (ex, ey, ez), node)
 
@@ -1231,14 +1286,7 @@ def handle_autonomous(node: MainNode) -> None:
     log("Disarmed — watchdog will stop bag and run post-flight processing")
 
     # ── 9. Tear Down ──────────────────────────────────────────────────────────
-    _stop_camera(cam)
-    stop_proc("Bag recorder",      bag_proc)
-    stop_proc("Collision monitor", collision_proc)
-    stop_proc("SLAM bridge",       bridge_proc)
-    stop_proc("Point-LIO",         pointlio_proc)
-    if hailo_proc:
-        stop_proc("Hailo flight node", hailo_proc)
-        HAILO_LOCK.unlink(missing_ok=True)
+    _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam)
     log("[MODE 3] Flight stack torn down cleanly")
 
 # ── Main State Machine ────────────────────────────────────────────────────────
@@ -1251,7 +1299,6 @@ def main() -> None:
 
     clear_lock()
 
-    # ── LED controller — non-fatal if unavailable ─────────────────────────────
     _write_main_status()
 
     node = MainNode()
@@ -1313,7 +1360,6 @@ def main() -> None:
                     current_mode = FlightMode.DEBOUNCE
             else:
                 debounce_start = None
-
                 _write_main_status()
                 log_mode(FlightMode.IDLE,
                          f"armed={armed}  mode={mode}  "

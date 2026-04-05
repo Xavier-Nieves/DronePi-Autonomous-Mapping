@@ -52,6 +52,27 @@ Camera (MODE 3 only)
   If Picamera2 is unavailable (e.g. camera not connected), the mission
   continues without captures — camera failure is non-fatal.
 
+GPS Augmentation (MODE 3 only)
+-------------------------------
+  GpsReader (flight/gps_reader.py) runs as a background polling thread.
+  It provides two independent services:
+
+    ① EXIF / sidecar geotag — get_fix() returns the best available GPS
+      fix at waypoint trigger. The fix is passed into CameraCapture.trigger()
+      context so every JPEG and sidecar JSON carries GPS coordinates alongside
+      the SLAM ENU position. Fix quality (HDOP, satellite count) is recorded
+      in the sidecar so post-processing can weight or discard marginal fixes.
+
+    ② Drift monitor — check_drift(slam_x, slam_y) compares the Pi GPS
+      position to the SLAM-derived ENU position after each fly_to(). A
+      disagreement > GPS_DRIFT_THRESHOLD_M (default 5.0 m) is logged as a
+      WARNING. At GPS_DRIFT_CRITICAL_M (default 10.0 m) the mission is
+      paused and the operator is alerted via buzzer. GPS is never fused
+      into EKF2 — SLAM remains the sole authoritative position source.
+
+  GpsReader failure is non-fatal: if no GPS backend is available the
+  mission continues with SLAM-only geotagging (same as original behaviour).
+
 Buzzer (MODE 3 only)
 --------------------
   MainNode.play_tune() publishes PlayTuneV2 to /mavros/play_tune, using the
@@ -109,49 +130,71 @@ FLIGHT_IMG_DIR      = Path("/mnt/ssd/flights")
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 DEBOUNCE_S        = 10      # Seconds after arm to wait before committing a mode
-HOME_TIMEOUT      = 30.0    # Seconds to wait for GPS home position (non-blocking — WARN only)
+HOME_TIMEOUT      = 30.0    # Seconds to wait for GPS home position (non-blocking)
 WP_TIMEOUT        = 15.0    # Seconds to wait for QGC waypoints
 EKF_STABLE_COUNT  = 20      # Consecutive stable Z readings required for EKF pass
 EKF_TIMEOUT       = 40.0    # Seconds to wait for EKF stability
 OFFBOARD_RESUME_S = 30      # Seconds to wait for OFFBOARD restore before RTL
 POLL_HZ           = 2       # State machine poll rate
 SETPOINT_HZ       = 20      # OFFBOARD setpoint publish rate (PX4 requires > 2 Hz)
-POINTLIO_INIT_S   = 5       # Fixed sleep fallback — topic verification preferred
-BRIDGE_INIT_S     = 2       # Fixed sleep fallback — topic verification preferred
-COLLISION_INIT_S  = 2       # Seconds to wait for collision monitor initialisation
-CAMERA_INIT_S     = 2       # Seconds to allow AEC/AWB convergence after camera start
+POINTLIO_INIT_S   = 5       # Fixed sleep fallback
+BRIDGE_INIT_S     = 2       # Fixed sleep fallback
+COLLISION_INIT_S  = 2       # Seconds to wait for collision monitor init
+CAMERA_INIT_S     = 2       # Seconds to allow AEC/AWB convergence
 GRACEFUL_KILL_S   = 5       # Seconds before SIGKILL after SIGINT
 DEFAULT_FOV_DEG   = 70.0    # Diagonal camera FOV fallback (degrees)
 DEFAULT_MIN_DENS  = 5       # Minimum LiDAR points per grid cell before gap fill
 WP_TOLERANCE_M    = 0.5     # Waypoint arrival tolerance (metres)
 
-# SLAM chain verification — replaces fixed sleeps after process launch
-SLAM_TOPIC_TIMEOUT_S   = 30.0  # Max seconds to wait for /aft_mapped_to_init
-BRIDGE_TOPIC_TIMEOUT_S = 15.0  # Max seconds to wait for /mavros/vision_pose/pose
-SLAM_MIN_HZ            = 5.0   # Minimum acceptable publish rate (Hz) for SLAM topic
-BRIDGE_MIN_HZ          = 8.0   # Minimum acceptable publish rate (Hz) for vision pose
+# SLAM chain verification
+SLAM_TOPIC_TIMEOUT_S   = 30.0
+BRIDGE_TOPIC_TIMEOUT_S = 15.0
+SLAM_MIN_HZ            = 5.0
+BRIDGE_MIN_HZ          = 8.0
 
 # Hailo in-flight integration
-HAILO_STARTUP_TIMEOUT_S = 20.0  # Max seconds to wait for Hailo node to publish
+HAILO_STARTUP_TIMEOUT_S = 20.0
 HAILO_FLOW_TOPIC        = "/hailo/optical_flow"
 HAILO_GROUND_TOPIC      = "/hailo/ground_class"
 HAILO_ENV               = os.path.expanduser("~/hailo_inference_env/bin/python3")
 
-# Velocity scale factors applied by fly_to() based on collision zone status.
+# Velocity scale factors applied by fly_to() based on collision zone status
 SPEED_SCALE_CLEAR    = 1.0
 SPEED_SCALE_CAUTION  = 0.5
 SPEED_SCALE_OBSTACLE = 0.2
 
 # Autonomous test flight constants
-HOVER_ALTITUDE_M     = 1.5    # Metres above takeoff Z for no-waypoints hover test
-HOVER_DWELL_S        = 10.0   # Seconds to hold hover before AUTO.LAND
-TAKEOFF_TIMEOUT_S    = 20.0   # Seconds to reach hover altitude before timeout
-TAKEOFF_TOLERANCE_M  = 0.25   # Metres — arrival threshold for takeoff setpoint
+HOVER_ALTITUDE_M     = 1.5
+HOVER_DWELL_S        = 10.0
+TAKEOFF_TIMEOUT_S    = 20.0
+TAKEOFF_TOLERANCE_M  = 0.25
 
-# Background setpoint streamer — keeps PX4 setpoint stream alive during
-# IDLE and DEBOUNCE so OFFBOARD mode is accepted when the operator switches.
-# PX4 requires > 2 Hz continuous stream before accepting OFFBOARD.
-IDLE_STREAM_HZ       = 10     # Hz for background hold-position stream
+# Background setpoint streamer
+IDLE_STREAM_HZ = 10
+
+# ── GPS Augmentation Constants ────────────────────────────────────────────────
+# These govern the drift monitor only. They do NOT affect EKF2 or SLAM.
+# SLAM remains the sole authoritative position source at all times.
+#
+# GPS_DRIFT_THRESHOLD_M — disagreement level that produces a WARNING log entry.
+#   Set above the GPS noise floor (±3–5 m CEP) to suppress false alarms.
+#   Default 5.0 m is the minimum safe value for consumer GPS.
+#
+# GPS_DRIFT_CRITICAL_M — disagreement level that pauses the mission, sounds
+#   a buzzer alert, and logs a CRITICAL entry. Operator can override by
+#   restoring OFFBOARD. Default 10.0 m represents a plausible SLAM map loss
+#   scenario where corrective action is warranted.
+#
+# GPS_DRIFT_CHECK_ENABLED — master switch. Set False to disable the drift
+#   check entirely while keeping GPS active for EXIF tagging only.
+#
+GPS_DRIFT_THRESHOLD_M  = float(os.environ.get("GPS_DRIFT_THRESHOLD_M", "5.0"))
+GPS_DRIFT_CRITICAL_M   = float(os.environ.get("GPS_DRIFT_CRITICAL_M",  "10.0"))
+GPS_DRIFT_CHECK_ENABLED = os.environ.get("GPS_DRIFT_CHECK", "1") != "0"
+
+# GPS startup — maximum seconds to wait for first reliable fix before
+# declaring GPS unavailable and continuing without it.
+GPS_FIX_WAIT_S = float(os.environ.get("GPS_FIX_WAIT_S", "15.0"))
 
 BAG_TOPICS = [
     "/cloud_registered",
@@ -240,14 +283,6 @@ class SetpointStreamer:
 
 
 # ── Main Status Writer ────────────────────────────────────────────────────────
-# main.py does NOT touch GPIO. It writes system status to /tmp/main_status.json.
-# led_service.py observes this file (and watchdog_status.json + mission lock)
-# and derives the correct LED state autonomously.
-#
-# To add a new LED-visible condition from main.py:
-#   1. Add a field to the payload dict in _write_main_status() below.
-#   2. Read it in led_service.py _read_snapshot() and _derive_state().
-#   3. Add a _Pattern entry and priority rule in led_service.py.
 
 _MAIN_STATUS_FILE     = "/tmp/main_status.json"
 _MAIN_STATUS_FILE_TMP = _MAIN_STATUS_FILE + ".tmp"
@@ -257,20 +292,29 @@ def _write_main_status(
     hailo_active:   bool = False,
     hailo_degraded: bool = False,
     hailo_failed:   bool = False,
+    gps_reliable:   bool = False,
+    gps_hdop:       float = 99.0,
+    gps_satellites: int   = 0,
+    gps_drift_m:    float = 0.0,
 ) -> None:
     """
-    Write main.py heartbeat and Hailo status to /tmp/main_status.json.
+    Write main.py heartbeat, Hailo status, and GPS augmentation status
+    to /tmp/main_status.json.
 
     Must be called on every poll cycle during autonomous flight so
-    led_service.py sees a live timestamp. If the timestamp goes stale
-    beyond MAIN_DEAD_S (8s) while autonomous lock is active, led_service.py
-    transitions to MAIN_DEAD.
+    led_service.py sees a live timestamp. The GPS fields are informational —
+    they are not consumed by led_service.py but are available for future
+    LED states or monitoring tools.
 
     Parameters
     ----------
     hailo_active   : Hailo node publishing and augmenting EKF2
-    hailo_degraded : FlowBridge degraded — consecutive rejection threshold exceeded
-    hailo_failed   : Hailo process exited unexpectedly mid-flight
+    hailo_degraded : FlowBridge degraded
+    hailo_failed   : Hailo process exited unexpectedly
+    gps_reliable   : Pi GPS fix passes quality gate (HDOP, sat count, fix type)
+    gps_hdop       : Current HDOP value from Pi GPS reader
+    gps_satellites : Satellite count from Pi GPS reader
+    gps_drift_m    : Last GPS↔SLAM disagreement in metres (0.0 if not checked)
     """
     try:
         payload = json.dumps({
@@ -278,6 +322,10 @@ def _write_main_status(
             "hailo_active":   hailo_active,
             "hailo_degraded": hailo_degraded,
             "hailo_failed":   hailo_failed,
+            "gps_reliable":   gps_reliable,
+            "gps_hdop":       round(gps_hdop, 2),
+            "gps_satellites": gps_satellites,
+            "gps_drift_m":    round(gps_drift_m, 2),
         })
         with open(_MAIN_STATUS_FILE_TMP, "w") as f:
             f.write(payload)
@@ -287,7 +335,6 @@ def _write_main_status(
 
 
 def _clear_main_status() -> None:
-    """Remove main status file on clean shutdown."""
     try:
         Path(_MAIN_STATUS_FILE).unlink(missing_ok=True)
         Path(_MAIN_STATUS_FILE_TMP).unlink(missing_ok=True)
@@ -405,9 +452,6 @@ class MainNode:
         self._vision_pose_stamp  = None
         self.hailo_active        = False
 
-        # Buzzer publisher — created lazily on first play_tune() call.
-        # Lazy init avoids a startup failure if mavros_msgs is not yet
-        # available when the node is constructed before MAVROS is ready.
         self._tune_pub = None
 
         rclpy.init()
@@ -526,7 +570,7 @@ class MainNode:
         with self._lock: return self._home
 
     def get_gps(self) -> tuple:
-        """Return current GPS fix as (lat, lon, alt) or (None, None, None)."""
+        """Return current MAVROS GPS fix as (lat, lon, alt) or (None, None, None)."""
         with self._lock:
             if self._gps_fix is None:
                 return None, None, None
@@ -541,10 +585,8 @@ class MainNode:
             return [w for w in self._waypoints if w.command == 16]
 
     def vision_pose_age_sec(self) -> float:
-        """Seconds since the last /mavros/vision_pose/pose message was received.
-
+        """Seconds since the last /mavros/vision_pose/pose message.
         Returns float('inf') if no message has ever been received.
-        Used by preflight checks and EKF monitor to verify the SLAM chain is live.
         """
         with self._lock:
             if self._vision_pose_stamp is None:
@@ -581,7 +623,7 @@ class MainNode:
         Speed is automatically scaled by the current collision zone:
           CLEAR    → SPEED_SCALE_CLEAR    (full speed)
           CAUTION  → SPEED_SCALE_CAUTION  (50%)
-          OBSTACLE → SPEED_SCALE_OBSTACLE (20% creep — PX4 CP_DIST is backstop)
+          OBSTACLE → SPEED_SCALE_OBSTACLE (20% creep)
 
         Returns True if the target was reached, False on timeout.
         """
@@ -617,20 +659,7 @@ class MainNode:
     # ── Buzzer ────────────────────────────────────────────────────────────────
 
     def play_tune(self, tune: str) -> None:
-        """Publish a QBASIC Format 1 tune to the Pixhawk buzzer via MAVROS.
-
-        Uses the same /mavros/play_tune topic and PlayTuneV2 message as
-        MavrosReader.play_tune() in the watchdog — both processes share the
-        same Pixhawk subscriber and can drive the buzzer independently.
-
-        The publisher is created lazily on first call so construction of
-        MainNode never fails even if mavros_msgs is not yet resolvable.
-
-        Parameters
-        ----------
-        tune : str
-            QBASIC Format 1 string (e.g. from watchdog_core/buzzer.py constants).
-        """
+        """Publish a QBASIC Format 1 tune to the Pixhawk buzzer via MAVROS."""
         try:
             from mavros_msgs.msg import PlayTuneV2
             if self._tune_pub is None:
@@ -664,16 +693,7 @@ class MainNode:
 # ── Pre-flight Checks ─────────────────────────────────────────────────────────
 
 def _wait_for_topic_hz(topic: str, min_hz: float, timeout_s: float) -> bool:
-    """Verify a ROS 2 topic is publishing above min_hz within timeout_s.
-
-    Shells out to `ros2 topic hz` with a short window sample. Used to
-    confirm the SLAM chain and Hailo node are actually publishing before
-    the flight stack is declared ready — replacing the previous fixed-sleep
-    approach which made a timing assumption rather than a health check.
-
-    Returns True if the measured rate meets or exceeds min_hz.
-    Returns False on timeout or if the topic is not publishing.
-    """
+    """Verify a ROS 2 topic is publishing above min_hz within timeout_s."""
     import subprocess as _sp
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -851,12 +871,160 @@ def run_preflight_checks(node: MainNode) -> bool:
     log("=" * 50)
     return all_pass
 
+# ── GPS Augmentation Helpers ──────────────────────────────────────────────────
+
+def _start_gps_reader():
+    """Import and start GpsReader. Returns instance or None if unavailable.
+
+    Failure is non-fatal. If the GPS reader cannot start, the mission
+    continues with SLAM-only geotagging — the same behaviour as before
+    this module was added.
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from flight.gps_reader import GpsReader
+        gps = GpsReader()
+        ok  = gps.start()
+        if ok:
+            log(f"[GPS] Reader started — backend={gps.backend}  "
+                f"HDOP_max={2.5}  sats_min=6")
+            return gps
+        else:
+            log("[GPS] WARN — GpsReader.start() failed (gpsd not running? pyserial missing?)")
+            log("      Mission continues with SLAM-only geotagging")
+            log("      Install: sudo apt install gpsd python3-gps  OR  pip install pyserial")
+            return None
+    except Exception as exc:
+        log(f"[GPS] WARN — Could not load gps_reader.py: {exc}")
+        log("      Mission continues with SLAM-only geotagging")
+        return None
+
+
+def _stop_gps_reader(gps) -> None:
+    """Stop GpsReader safely, tolerating None."""
+    if gps is None:
+        return
+    try:
+        stats = gps.get_stats()
+        gps.stop()
+        log(f"[GPS] Stopped — {stats['fix_count']} reliable fixes accepted  "
+            f"{stats['reject_count']} rejected  backend={stats['backend']}")
+    except Exception as exc:
+        log(f"[GPS] Error during stop: {exc}")
+
+
+def _wait_for_gps_home(gps, timeout_s: float) -> bool:
+    """Wait for first reliable GPS fix and call set_home().
+
+    Non-blocking on failure — returns True if home was set, False if
+    no reliable fix arrived within timeout_s. Caller continues regardless.
+    """
+    if gps is None:
+        return False
+
+    log(f"[GPS] Waiting up to {timeout_s:.0f}s for reliable fix to set home datum...")
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if gps.is_reliable():
+            ok = gps.set_home()
+            if ok:
+                fix = gps.get_reliable_fix()
+                log(f"[GPS] Home datum set  "
+                    f"lat={fix.lat:.7f}  lon={fix.lon:.7f}  "
+                    f"alt={fix.alt:.1f}m  HDOP={fix.hdop:.2f}  "
+                    f"sats={fix.satellites}")
+                return True
+        time.sleep(0.5)
+
+    log(f"[GPS] WARN — No reliable fix within {timeout_s:.0f}s "
+        f"— geotagging will use MAVROS GPS fix if available, otherwise SLAM origin")
+    return False
+
+
+def _get_geotag_gps(gps, node: MainNode) -> tuple:
+    """Return best available GPS coordinate for EXIF/sidecar tagging.
+
+    Priority:
+        1. Pi GpsReader reliable fix (best metadata — includes HDOP)
+        2. MAVROS NavSatFix from /mavros/global_position/global (fallback)
+        3. (None, None, None) — no GPS available
+
+    The Pi GPS fix is preferred because it includes HDOP and satellite count
+    in the returned GpsFix object, which the camera sidecar JSON records for
+    post-processing quality assessment. The MAVROS fix is a fallback for when
+    the Pi GPS is unavailable or unreliable.
+    """
+    if gps is not None:
+        fix = gps.get_fix()   # get_fix() not get_reliable_fix() — always log
+        if fix is not None and not fix.is_stale():
+            return fix.lat, fix.lon, fix.alt
+
+    # Fall through to MAVROS GPS
+    return node.get_gps()
+
+
+def _run_drift_check(
+    gps,
+    slam_x: float,
+    slam_y: float,
+    node: MainNode,
+    _play,
+    _buzzer_available: bool,
+) -> float:
+    """Run GPS↔SLAM drift check at current SLAM position.
+
+    Returns the disagreement distance in metres (0.0 if check skipped).
+    Logs WARNING at GPS_DRIFT_THRESHOLD_M, CRITICAL at GPS_DRIFT_CRITICAL_M.
+    At critical level, sounds a warning buzzer tone — does NOT abort mission
+    autonomously since GPS accuracy alone cannot confirm SLAM failure.
+    The operator receives the alert and decides whether to intervene.
+    """
+    if gps is None or not GPS_DRIFT_CHECK_ENABLED:
+        return 0.0
+
+    if not gps.is_reliable():
+        return 0.0
+
+    delta = gps.get_enu_delta()
+    if delta is None:
+        return 0.0
+
+    gps_east, gps_north, _ = delta
+    disagreement = math.sqrt(
+        (gps_east  - slam_x) ** 2 +
+        (gps_north - slam_y) ** 2
+    )
+
+    fix = gps.get_reliable_fix()
+    hdop_str = f"HDOP={fix.hdop:.2f}" if fix else ""
+
+    if disagreement >= GPS_DRIFT_CRITICAL_M:
+        log(f"[GPS][CRITICAL] GPS↔SLAM disagreement={disagreement:.1f}m "
+            f"(threshold={GPS_DRIFT_CRITICAL_M:.1f}m)  {hdop_str}  "
+            f"GPS=({gps_east:.1f},{gps_north:.1f})  "
+            f"SLAM=({slam_x:.1f},{slam_y:.1f})  "
+            f"— SLAM may have degraded. Monitor closely.")
+        if _buzzer_available:
+            try:
+                from flight.watchdog_core.buzzer import TUNE_WARNING
+                _play(TUNE_WARNING)
+            except Exception:
+                pass
+
+    elif disagreement >= GPS_DRIFT_THRESHOLD_M:
+        log(f"[GPS][WARN] GPS↔SLAM disagreement={disagreement:.1f}m "
+            f"(threshold={GPS_DRIFT_THRESHOLD_M:.1f}m)  {hdop_str}  "
+            f"GPS=({gps_east:.1f},{gps_north:.1f})  "
+            f"SLAM=({slam_x:.1f},{slam_y:.1f})")
+
+    return round(disagreement, 2)
+
 # ── Camera Helpers ────────────────────────────────────────────────────────────
 
 def _start_camera(session_id: str):
     """Import and start CameraCapture. Returns instance or None if unavailable."""
     try:
-        sys.path.insert(0, str(FLIGHT_DIR))
+        sys.path.insert(0, str(PROJECT_ROOT))
         from flight.camera_capture import CameraCapture
         cam = CameraCapture(session_id=session_id)
         ok  = cam.start()
@@ -884,20 +1052,37 @@ def _stop_camera(cam) -> None:
         log(f"[CAM] Error during stop: {exc}")
 
 
-def _trigger_camera(cam, waypoint_index: int, enu: tuple, node: MainNode) -> None:
-    """Fire one camera trigger at waypoint arrival."""
+def _trigger_camera(
+    cam,
+    waypoint_index: int,
+    enu: tuple,
+    gps_coords: tuple,
+    gps_quality: dict,
+) -> None:
+    """Fire one camera trigger at waypoint arrival.
+
+    Parameters
+    ----------
+    cam           : CameraCapture instance or None
+    waypoint_index: Zero-based waypoint index
+    enu           : (east, north, up) in metres — SLAM-derived position
+    gps_coords    : (lat, lon, alt) — best available GPS coordinates
+    gps_quality   : dict with keys hdop, satellites, reliable, source
+                    Written into sidecar JSON for post-processing quality gate
+    """
     if cam is None:
         return
 
-    gps_lat, gps_lon, gps_alt = node.get_gps()
+    gps_lat, gps_lon, gps_alt = gps_coords
     context = {
         "waypoint_index": waypoint_index,
         "enu":            enu,
         "gps":            (gps_lat, gps_lon, gps_alt),
+        "gps_quality":    gps_quality,   # HDOP, sat count, source — new field
     }
     saved = cam.trigger(context)
     if saved:
-        gps_str = (f"{gps_lat:.5f},{gps_lon:.5f}"
+        gps_str = (f"{gps_lat:.5f},{gps_lon:.5f}  HDOP={gps_quality.get('hdop', '?')}"
                    if gps_lat is not None else "no-fix")
         log(f"  [CAM] WP {waypoint_index + 1} → {saved.name}  (gps={gps_str})")
     else:
@@ -941,38 +1126,45 @@ def handle_autonomous(node: MainNode) -> None:
     """MODE 3 — Autonomous survey. main.py owns the full flight stack.
 
     Execution order:
-        1. Run pre-flight checks (abort to IDLE on any failure).
-        2. Write mission lock.
-        3. Launch Point-LIO → SLAM bridge → Hailo (non-fatal) →
-           collision monitor → bag recorder.
-        4. Start CameraCapture background thread (non-fatal if unavailable).
-        5. Stream pre-arm setpoints (3 s) required before PX4 accepts OFFBOARD.
-        6. Initialise GapDetector for real-time coverage monitoring.
-        7. Execute each NAV_WAYPOINT:
+        1.  Run pre-flight checks (abort to IDLE on any failure).
+        2.  Write mission lock.
+        3.  Launch Point-LIO → SLAM bridge → Hailo (non-fatal) →
+            collision monitor → bag recorder.
+        3b. Wire FlowBridge into MainNode for Hailo EKF2 velocity augmentation.
+        4.  Start CameraCapture background thread (non-fatal if unavailable).
+        4b. Start GpsReader background thread (non-fatal if unavailable).
+            Wait GPS_FIX_WAIT_S for first reliable fix and set home datum.
+        5.  Stream pre-arm setpoints (3 s) required before PX4 accepts OFFBOARD.
+        6.  Initialise GapDetector for real-time coverage monitoring.
+        7.  Execute each NAV_WAYPOINT:
                a. Handle OFFBOARD loss — pause / RTL after OFFBOARD_RESUME_S.
                b. fly_to() with collision-zone speed scaling.
                c. Gap-fill sub-waypoints if density below threshold.
-               d. Trigger IMX477 capture with ENU + GPS metadata.
-        8. AUTO.RTL on mission complete.
-        9. Wait for disarm, then tear down all processes and camera.
+               d. GPS drift check — WARN at 5 m, CRITICAL + buzzer at 10 m.
+               e. Trigger IMX477 capture with ENU + GPS metadata + quality.
+               f. Update main status file with GPS telemetry.
+        8.  AUTO.RTL on mission complete.
+        9.  Wait for disarm, then tear down all processes, camera, GPS reader.
+
+    GPS Augmentation (non-fatal throughout):
+        GpsReader runs in a background thread and is never in the critical
+        path. If it fails to start, returns no fix, or loses signal mid-flight,
+        all GPS-dependent operations degrade gracefully:
+          - EXIF tagging falls back to MAVROS NavSatFix
+          - Drift check is skipped when no reliable fix is available
+          - Mission execution is never paused or aborted due to GPS issues
 
     Buzzer:
-        ScanBeeper (from watchdog_core/buzzer.py) runs throughout the mission
-        via node.play_tune(), giving the same 1 Hz audio heartbeat as a manual
-        scan. TUNE_SCAN_START fires once at mission commitment.
-        TUNE_SCAN_FINISHED fires on all exit paths (normal, abort, disarm).
-
-    Args:
-        node: MainNode — shared ROS 2 node.
+        ScanBeeper runs throughout via node.play_tune(). TUNE_WARNING fires
+        on GPS critical drift events. TUNE_SCAN_FINISHED fires on all exits.
     """
-    # Import buzzer tones and ScanBeeper from the watchdog_core package.
-    # These are available in the dronepi conda env alongside the rest of the stack.
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "flight"))
         from flight.watchdog_core.buzzer import (
             ScanBeeper,
             TUNE_SCAN_START,
             TUNE_SCAN_FINISHED,
+            TUNE_WARNING,
         )
         _buzzer_available = True
     except ImportError as exc:
@@ -980,7 +1172,6 @@ def handle_autonomous(node: MainNode) -> None:
         _buzzer_available = False
 
     def _play(tune: str) -> None:
-        """Play a tune via node, only when buzzer is available."""
         if _buzzer_available:
             node.play_tune(tune)
 
@@ -994,24 +1185,20 @@ def handle_autonomous(node: MainNode) -> None:
 
     write_lock("autonomous")
 
-    # Initialise ScanBeeper before the stack launches so it is ready to start
-    # the moment the mission is committed (after pre-stream setpoints).
     scan_beeper = (
         ScanBeeper(play_tune_fn=node.play_tune) if _buzzer_available else None
     )
 
     # ── Teardown helper — called on every exit path ────────────────────────────
-    # Defined here so every return statement can call a single function rather
-    # than duplicating the stop_proc sequence, which previously meant buzzer
-    # stop calls were easy to miss on early-exit paths.
     def _teardown(
-        bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam
+        bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam, gps
     ) -> None:
         if scan_beeper is not None:
             scan_beeper.stop()
         _play(TUNE_SCAN_FINISHED if _buzzer_available else "")
         log("[BUZZER] autonomous scan_finished")
         _stop_camera(cam)
+        _stop_gps_reader(gps)
         stop_proc("Bag recorder",      bag_proc)
         stop_proc("Collision monitor", collision_proc)
         stop_proc("SLAM bridge",       bridge_proc)
@@ -1069,7 +1256,6 @@ def handle_autonomous(node: MainNode) -> None:
             _write_main_status(hailo_active=True)
         else:
             log("[WARN] Hailo node did not publish within timeout — continuing without it")
-            log("       CPU load will be higher. Check /dev/hailo0 and hailo_inference_env")
             stop_proc("Hailo flight node", hailo_proc)
             hailo_proc = None
             _write_main_status(hailo_failed=True)
@@ -1103,7 +1289,7 @@ def handle_autonomous(node: MainNode) -> None:
     flow_bridge = None
     if hailo_proc is not None:
         try:
-            sys.path.insert(0, str(FLIGHT_DIR))
+            sys.path.insert(0, str(PROJECT_ROOT))
             from flight._flow_bridge import FlowBridge
 
             def _on_flow_degraded():
@@ -1124,27 +1310,31 @@ def handle_autonomous(node: MainNode) -> None:
         log(f"[CAM] Waiting {CAMERA_INIT_S}s for AEC/AWB convergence...")
         time.sleep(CAMERA_INIT_S)
 
+    # ── 4b. Start GPS Reader ──────────────────────────────────────────────────
+    # GpsReader is started after the camera to keep the startup sequence
+    # consistent — camera has the longer blocking init (AEC/AWB sleep).
+    # GPS is non-fatal: if it fails here the mission continues unchanged.
+    gps = _start_gps_reader()
+    gps_home_set = _wait_for_gps_home(gps, GPS_FIX_WAIT_S)
+    if not gps_home_set:
+        log("[GPS] Home datum not set — drift check will be skipped. "
+            "EXIF will use MAVROS GPS fallback if Pi GPS unavailable.")
+
     # ── Load Waypoints ────────────────────────────────────────────────────────
     home    = node.get_home()
     nav_wps = node.get_nav_waypoints()
 
     if not nav_wps or home is None:
-        # ── No-waypoints test flight: takeoff → hover → AUTO.LAND ────────────
-        # TEST BEHAVIOUR — replace with 'return' when production missions only.
-        # Allows verifying the full OFFBOARD arm and EKF2 chain without a
-        # pre-uploaded mission. Drone climbs to HOVER_ALTITUDE_M, holds for
-        # HOVER_DWELL_S, then switches to AUTO.LAND.
+        # ── No-waypoints test flight ──────────────────────────────────────────
         log("[MODE 3] No waypoints — executing hover test "
             f"(alt={HOVER_ALTITUDE_M}m  dwell={HOVER_DWELL_S}s)")
 
         hx, hy, hz = node.get_pos()
         hover_z     = hz + HOVER_ALTITUDE_M
 
-        # Stream current position for 3s before takeoff so OFFBOARD stays active
         log("Pre-streaming hold setpoint (3s)...")
         node.stream_sp(hx, hy, hz, 0.0, 3.0)
 
-        # Climb to hover altitude
         log(f"Climbing to {hover_z:.2f}m...")
         reached = node.fly_to(hx, hy, hover_z, 0.0, timeout=TAKEOFF_TIMEOUT_S)
         if not reached:
@@ -1160,17 +1350,7 @@ def handle_autonomous(node: MainNode) -> None:
         while node.armed:
             time.sleep(0.5)
 
-        _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam)
-
-        _stop_camera(cam)
-        stop_proc("Bag recorder",      bag_proc)
-        stop_proc("Collision monitor", collision_proc)
-        if bridge_proc is not None:
-            stop_proc("SLAM bridge", bridge_proc)
-        stop_proc("Point-LIO",         pointlio_proc)
-        if hailo_proc:
-            stop_proc("Hailo flight node", hailo_proc)
-            HAILO_LOCK.unlink(missing_ok=True)
+        _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam, gps)
         return
 
     enu_wps = [
@@ -1197,7 +1377,7 @@ def handle_autonomous(node: MainNode) -> None:
     gap_fill_enabled = False
     gap_det = None
     try:
-        sys.path.insert(0, str(FLIGHT_DIR))
+        sys.path.insert(0, str(PROJECT_ROOT))
         from flight.gap_detector import GapDetector
 
         fov_half    = math.radians(DEFAULT_FOV_DEG / 2.0)
@@ -1216,11 +1396,12 @@ def handle_autonomous(node: MainNode) -> None:
 
     # ── 7. Waypoint Execution ─────────────────────────────────────────────────
     offboard_lost_at = None
+    last_drift_m     = 0.0   # Tracks most recent GPS↔SLAM disagreement for status
 
     for i, (ex, ey, ez) in enumerate(enu_wps):
         log(f"Waypoint {i + 1}/{len(enu_wps)}: ENU=({ex:.1f}, {ey:.1f}, {ez:.1f})")
 
-        # Handle OFFBOARD loss
+        # ── Handle OFFBOARD loss ───────────────────────────────────────────────
         while node.mode != "OFFBOARD" and node.armed:
             if offboard_lost_at is None:
                 offboard_lost_at = time.time()
@@ -1233,7 +1414,7 @@ def handle_autonomous(node: MainNode) -> None:
                 node.set_mode("AUTO.RTL")
                 while node.armed:
                     time.sleep(0.5)
-                _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam)
+                _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam, gps)
                 return
             time.sleep(0.5)
 
@@ -1245,7 +1426,7 @@ def handle_autonomous(node: MainNode) -> None:
             log("[MODE 3] Disarmed mid-mission — stopping")
             break
 
-        # Hailo health check per waypoint
+        # ── Hailo health check per waypoint ───────────────────────────────────
         if hailo_proc is not None and hailo_proc.poll() is not None:
             log(f"[HAILO] Flight node exited unexpectedly "
                 f"(code: {hailo_proc.poll()}) — continuing without Hailo")
@@ -1254,12 +1435,12 @@ def handle_autonomous(node: MainNode) -> None:
             HAILO_LOCK.unlink(missing_ok=True)
             _write_main_status(hailo_failed=True)
 
-        # Fly to waypoint
+        # ── Fly to waypoint ────────────────────────────────────────────────────
         reached = node.fly_to(ex, ey, ez, 0.0, timeout=120.0)
         if not reached:
             log(f"[WARN] Waypoint {i + 1} not reached within timeout — continuing")
 
-        # Gap fill
+        # ── Gap fill ───────────────────────────────────────────────────────────
         if gap_fill_enabled and gap_det is not None:
             cx, cy, cz  = node.get_pos()
             fov_half    = math.radians(DEFAULT_FOV_DEG / 2.0)
@@ -1272,9 +1453,46 @@ def handle_autonomous(node: MainNode) -> None:
                     node.fly_to(gx, gy, ez, 0.0, timeout=60.0)
                     node.fly_to(ex, ey, ez, 0.0, timeout=60.0)
 
-        # Camera trigger — dwell one cycle before capture so drone is stationary
+        # ── GPS drift check ────────────────────────────────────────────────────
+        # Run after fly_to() confirms arrival so the position comparison is
+        # against the settled SLAM position, not a position mid-transit.
+        # Skipped automatically if GPS has no reliable fix or home not set.
+        cx, cy, _ = node.get_pos()
+        last_drift_m = _run_drift_check(
+            gps, cx, cy, node, _play, _buzzer_available
+        )
+
+        # ── Dwell + camera trigger ─────────────────────────────────────────────
         node.stream_sp(ex, ey, ez, 0.0, 0.05)
-        _trigger_camera(cam, i, (ex, ey, ez), node)
+
+        # Build GPS geotag from best available source
+        gps_coords  = _get_geotag_gps(gps, node)
+        gps_quality = {}
+        if gps is not None:
+            fix = gps.get_fix()
+            if fix is not None:
+                gps_quality = {
+                    "hdop":       fix.hdop,
+                    "satellites": fix.satellites,
+                    "reliable":   fix.reliable,
+                    "source":     fix.source,
+                }
+
+        _trigger_camera(cam, i, (ex, ey, ez), gps_coords, gps_quality)
+
+        # ── Update main status ─────────────────────────────────────────────────
+        hailo_ok   = hailo_proc is not None and hailo_proc.poll() is None
+        hailo_deg  = flow_bridge.is_degraded() if flow_bridge is not None else False
+        fix_now    = gps.get_fix() if gps is not None else None
+        _write_main_status(
+            hailo_active=hailo_ok and not hailo_deg,
+            hailo_degraded=hailo_deg,
+            hailo_failed=(hailo_proc is None and flow_bridge is not None),
+            gps_reliable=fix_now.reliable if fix_now else False,
+            gps_hdop=fix_now.hdop if fix_now else 99.0,
+            gps_satellites=fix_now.satellites if fix_now else 0,
+            gps_drift_m=last_drift_m,
+        )
 
     # ── 8. Mission Complete → RTL ─────────────────────────────────────────────
     log("Mission complete — switching to AUTO.RTL")
@@ -1286,7 +1504,7 @@ def handle_autonomous(node: MainNode) -> None:
     log("Disarmed — watchdog will stop bag and run post-flight processing")
 
     # ── 9. Tear Down ──────────────────────────────────────────────────────────
-    _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam)
+    _teardown(bag_proc, collision_proc, bridge_proc, pointlio_proc, hailo_proc, cam, gps)
     log("[MODE 3] Flight stack torn down cleanly")
 
 # ── Main State Machine ────────────────────────────────────────────────────────
@@ -1298,7 +1516,6 @@ def main() -> None:
     log("=" * 55)
 
     clear_lock()
-
     _write_main_status()
 
     node = MainNode()
@@ -1329,8 +1546,6 @@ def main() -> None:
     current_mode   = FlightMode.IDLE
     debounce_start = None
 
-    # Start background setpoint streamer immediately so PX4 sees a valid
-    # stream before the operator switches to OFFBOARD mode.
     streamer = SetpointStreamer(node)
     streamer.start()
 

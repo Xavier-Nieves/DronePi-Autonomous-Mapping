@@ -11,6 +11,17 @@ Measurement chain
       → ROS DDS publish → MAVROS subscriber receives  ← to here
       → MAVROS serialises → serial 57600 baud → PX4 EKF2  ← +SERIAL_OFFSET_MS
 
+Watchdog isolation
+------------------
+Stop drone-watchdog.service manually before running this test, then
+restart it when done. The watchdog must not be running during the test
+because it competes with the test's own Point-LIO and SLAM bridge
+subprocesses for the same ROS topics and serial port.
+
+  sudo systemctl stop drone-watchdog.service
+  python3 test_ekf2_latency.py
+  sudo systemctl start drone-watchdog.service
+
 Architecture note
 -----------------
 This script owns a single rclpy context (one rclpy.init() call).
@@ -24,7 +35,9 @@ rclpy.init() again, which would conflict.
 
 Requirements
 ------------
+  - sudo systemctl stop drone-watchdog.service  (before running)
   - Unitree L1 LiDAR connected on /dev/ttyUSB0
+  - pointlio-standby.service active and publishing /aft_mapped_to_init
   - SLAM bridge (_slam_bridge.py) available
   - MAVROS running (mavros.service)
   - System time sync between Pi and Pixhawk is NOT required
@@ -37,6 +50,8 @@ Usage
   python3 test_ekf2_latency.py                  # default: 200 samples
   python3 test_ekf2_latency.py --samples 500
   python3 test_ekf2_latency.py --timeout 120
+
+  sudo systemctl start drone-watchdog.service   (after test completes)
 
 Output
 ------
@@ -74,8 +89,8 @@ BRIDGE_SCRIPT = Path(__file__).parent.parent / "flight" / "_slam_bridge.py"
 MISSION_LOCK  = Path("/tmp/dronepi_mission.lock")
 LIDAR_PORT    = "/dev/ttyUSB0"
 
-POINTLIO_TIMEOUT_S = 45
-GRACEFUL_KILL_S    = 5
+POINTLIO_TIMEOUT_S  = 45
+GRACEFUL_KILL_S     = 5
 
 # ── Latency constants ─────────────────────────────────────────────────────────
 
@@ -94,13 +109,15 @@ def log(msg: str):
     print(f"[{ts}] {msg}", flush=True)
 
 
+
+
 # ── Lock file helpers ─────────────────────────────────────────────────────────
 
 def write_lock():
     MISSION_LOCK.write_text(
         json.dumps({"mode": "bench_scan",
                     "started_at": datetime.now().isoformat()}))
-    log("Watchdog lock written (bench_scan) — watchdog yielding")
+    log("Watchdog lock written (bench_scan) — secondary process guard active")
 
 
 def clear_lock():
@@ -109,7 +126,7 @@ def clear_lock():
             data = json.loads(MISSION_LOCK.read_text())
             if data.get("mode") == "bench_scan":
                 MISSION_LOCK.unlink()
-                log("Watchdog lock cleared — watchdog resuming normal operation")
+                log("Watchdog lock cleared")
         except Exception:
             pass
 
@@ -318,6 +335,8 @@ def print_results(delays_ms: list) -> int:
     return recommended
 
 
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -333,49 +352,57 @@ def main():
     print("  EKF2_EV_DELAY Latency Test")
     print("=" * 55)
 
-    write_lock()
-
     pointlio_proc = None
     bridge_proc   = None
     probe         = None
-
     def _cleanup():
-        log("Interrupted — stopping stack cleanly...")
+        """
+        Tear down the test stack in the correct order.
+        Called on both normal exit and Ctrl+C.
+        """
+        log("Cleaning up test stack...")
         if bridge_proc:
             stop_proc("slam_bridge", bridge_proc)
         if pointlio_proc:
             stop_proc("Point-LIO", pointlio_proc)
         if probe:
-            probe.shutdown()
+            try:
+                probe.shutdown()
+            except Exception:
+                pass
         clear_lock()
 
     def _sighandler(signum, frame):
         print()
+        log(f"Signal {signum} received — stopping test cleanly")
         _cleanup()
         sys.exit(0)
 
     signal.signal(signal.SIGINT,  _sighandler)
     signal.signal(signal.SIGTERM, _sighandler)
 
-    # ── Single rclpy node owns all subscriptions ──────────────────────────────
+    write_lock()
+
+    # ── Single rclpy node owns all subscriptions ─────────────────────────────
     # LatencyProbeNode calls rclpy.init() exactly once. Point-LIO and the
     # SLAM bridge are OS subprocesses — they do not share this context.
     probe = LatencyProbeNode(n_samples=args.samples)
 
-    # ── Launch Point-LIO subprocess ───────────────────────────────────────────
+    # ── Step 3: Launch Point-LIO subprocess ───────────────────────────────────
     pointlio_cmd = (
         f"source {ROS_SETUP} && source {WS_SETUP} && "
         f"ros2 launch {LAUNCH_FILE} rviz:=false port:={LIDAR_PORT}"
     )
     pointlio_proc = start_proc("Point-LIO", pointlio_cmd)
 
-    # ── Wait for SLAM output — reuses probe node, no second rclpy.init() ─────
+    # ── Step 4: Wait for SLAM output ──────────────────────────────────────────
+    # Reuses the probe node — no second rclpy.init()
     cloud_ok = probe.wait_for_cloud(timeout=POINTLIO_TIMEOUT_S)
     if not cloud_ok:
         log(f"[WARN] /cloud_registered not seen after {POINTLIO_TIMEOUT_S}s")
         log("       Continuing — SLAM bridge may still produce vision poses")
 
-    # ── Launch SLAM bridge subprocess ─────────────────────────────────────────
+    # ── Step 5: Launch SLAM bridge subprocess ─────────────────────────────────
     if BRIDGE_SCRIPT.exists():
         bridge_cmd = (
             f"source {ROS_SETUP} && source {WS_SETUP} && "
@@ -385,12 +412,11 @@ def main():
         log("Allowing slam_bridge 5s to stabilise...")
         time.sleep(5.0)
     else:
-        log(f"[WARN] _slam_bridge.py not found at {BRIDGE_SCRIPT}")
-        log("       Cannot collect latency samples without the bridge")
+        log(f"[FAIL] _slam_bridge.py not found at {BRIDGE_SCRIPT}")
         _cleanup()
         sys.exit(1)
 
-    # ── Collect samples ───────────────────────────────────────────────────────
+    # ── Step 6: Collect samples ───────────────────────────────────────────────
     log(f"Subscribed to /mavros/vision_pose/pose — collecting {args.samples} samples")
     t_start = time.time()
 
@@ -405,20 +431,29 @@ def main():
     except KeyboardInterrupt:
         log("Interrupted by user")
 
-    # ── Stop stack ────────────────────────────────────────────────────────────
+    # ── Step 7: Capture samples before tearing down the probe ────────────────
+    # Save the delay list now — probe.shutdown() destroys the rclpy node but
+    # does not clear delays_ms. We null the probe reference afterward so the
+    # _cleanup() signal handler does not attempt a double-shutdown.
+    final_samples = list(probe.delays_ms)
+
+    # ── Stop test stack ───────────────────────────────────────────────────────
     stop_proc("slam_bridge", bridge_proc)
-    stop_proc("Point-LIO",   pointlio_proc)
+    bridge_proc = None
+    stop_proc("Point-LIO", pointlio_proc)
+    pointlio_proc = None
     probe.shutdown()
+    probe = None
     clear_lock()
 
     # ── Print results ─────────────────────────────────────────────────────────
-    if len(probe.delays_ms) < 20:
-        print(f"\n[FAIL] Not enough samples ({len(probe.delays_ms)}).")
+    if len(final_samples) < 20:
+        print(f"\n[FAIL] Not enough samples ({len(final_samples)}).")
         print("       Is _slam_bridge.py publishing /mavros/vision_pose/pose?")
         print("       Check:  ros2 topic hz /mavros/vision_pose/pose")
         sys.exit(1)
 
-    print_results(probe.delays_ms)
+    print_results(final_samples)
 
 
 if __name__ == "__main__":

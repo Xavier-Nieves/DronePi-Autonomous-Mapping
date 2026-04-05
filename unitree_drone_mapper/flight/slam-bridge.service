@@ -1,0 +1,45 @@
+[Unit]
+Description=DronePi SLAM Bridge — Point-LIO odometry to MAVROS vision pose
+# Start after both MAVROS and Point-LIO standby are running.
+# MAVROS must be up so the bridge has a valid /mavros/vision_pose/pose
+# publisher to forward to. Point-LIO standby must be up so
+# /aft_mapped_to_init exists to subscribe to.
+#
+# Wants= rather than Requires= for both dependencies so that if either
+# service restarts independently, slam-bridge.service also restarts via
+# Restart=on-failure without taking the others down with it.
+After=mavros.service pointlio-standby.service
+Wants=mavros.service pointlio-standby.service
+
+[Service]
+Type=simple
+User=dronepi
+Environment="HOME=/home/dronepi"
+
+# Source both ROS 2 Jazzy and the project workspace before launching.
+# The bridge subscribes to /aft_mapped_to_init (Point-LIO, nav_msgs/Odometry)
+# and publishes to /mavros/vision_pose/pose (geometry_msgs/PoseStamped)
+# and /mavros/odometry/out (nav_msgs/Odometry) for full EKF2 fusion.
+ExecStart=/bin/bash -c "\
+    source /opt/ros/jazzy/setup.bash && \
+    source /home/dronepi/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash && \
+    python3 /home/dronepi/unitree_lidar_project/unitree_drone_mapper/flight/_slam_bridge.py"
+
+# Restart on failure — if the bridge crashes mid-session, systemd
+# relaunches it automatically. The bridge is stateless (it only
+# forwards messages) so restart is always safe.
+Restart=on-failure
+RestartSec=5
+
+# Allow bridge 10 seconds to shut down cleanly on stop.
+# The bridge is a simple rclpy node — it should exit on SIGINT immediately,
+# but this margin covers any DDS cleanup delays.
+TimeoutStopSec=10
+KillSignal=SIGINT
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slam-bridge
+
+[Install]
+WantedBy=multi-user.target

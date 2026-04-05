@@ -133,17 +133,6 @@ SPEED_SCALE_CLEAR    = 1.0
 SPEED_SCALE_CAUTION  = 0.5
 SPEED_SCALE_OBSTACLE = 0.2
 
-# Autonomous test flight constants
-HOVER_ALTITUDE_M     = 1.5    # Metres above takeoff Z for no-waypoints hover test
-HOVER_DWELL_S        = 10.0   # Seconds to hold hover before AUTO.LAND
-TAKEOFF_TIMEOUT_S    = 20.0   # Seconds to reach hover altitude before timeout
-TAKEOFF_TOLERANCE_M  = 0.25   # Metres — arrival threshold for takeoff setpoint
-
-# Background setpoint streamer — keeps PX4 setpoint stream alive during
-# IDLE and DEBOUNCE so OFFBOARD mode is accepted when the operator switches.
-# PX4 requires > 2 Hz continuous stream before accepting OFFBOARD.
-IDLE_STREAM_HZ       = 10     # Hz for background hold-position stream
-
 BAG_TOPICS = [
     "/cloud_registered",
     "/aft_mapped_to_init",
@@ -176,59 +165,6 @@ def log(msg: str) -> None:
 def log_mode(mode: FlightMode, detail: str = "") -> None:
     sep = f"  {detail}" if detail else ""
     log(f"[{mode.value}]{sep}")
-
-
-# ── Background Setpoint Streamer ─────────────────────────────────────────────
-
-class SetpointStreamer:
-    """
-    Publishes a hold-position setpoint continuously at IDLE_STREAM_HZ.
-
-    Runs as a daemon thread during IDLE and DEBOUNCE states so PX4 always
-    has an active setpoint stream. Without this, switching to OFFBOARD mode
-    is rejected because PX4 requires the stream to be present before the
-    mode switch is accepted.
-
-    The streamer holds the position captured at start() — it does not track
-    the drone's current position. This is intentional: during IDLE the drone
-    is on the ground and the setpoint is simply "stay at ground origin".
-
-    Usage:
-        streamer = SetpointStreamer(node)
-        streamer.start()          # begin streaming
-        streamer.stop()           # stop before handle_autonomous() takes over
-    """
-
-    def __init__(self, node: "MainNode") -> None:
-        self._node    = node
-        self._thread  = None
-        self._stop_ev = threading.Event()
-
-    def start(self) -> None:
-        """Capture current position and begin streaming."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_ev.clear()
-        self._thread = threading.Thread(
-            target=self._loop, daemon=True, name="setpoint_streamer"
-        )
-        self._thread.start()
-        log("SetpointStreamer started — holding position for OFFBOARD readiness")
-
-    def stop(self) -> None:
-        """Stop the background stream. Blocks until thread exits."""
-        self._stop_ev.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
-        log("SetpointStreamer stopped — handle_autonomous() owns setpoints")
-
-    def _loop(self) -> None:
-        interval = 1.0 / IDLE_STREAM_HZ
-        while not self._stop_ev.is_set():
-            hx, hy, hz = self._node.get_pos()
-            self._node.publish_sp(hx, hy, hz, 0.0)
-            time.sleep(interval)
 
 
 # ── Main Status Writer ───────────────────────────────────────────────────────
@@ -1071,42 +1007,12 @@ def handle_autonomous(node: MainNode) -> None:
     nav_wps = node.get_nav_waypoints()
 
     if not nav_wps or home is None:
-        # ── No-waypoints test flight: takeoff → hover → AUTO.LAND ────────────
-        # TEST BEHAVIOUR — replace with 'return' when production missions only.
-        # Allows verifying the full OFFBOARD arm and EKF2 chain without a
-        # pre-uploaded mission. Drone climbs to HOVER_ALTITUDE_M, holds for
-        # HOVER_DWELL_S, then switches to AUTO.LAND.
-        log("[MODE 3] No waypoints — executing hover test "
-            f"(alt={HOVER_ALTITUDE_M}m  dwell={HOVER_DWELL_S}s)")
-
-        hx, hy, hz = node.get_pos()
-        hover_z     = hz + HOVER_ALTITUDE_M
-
-        # Stream current position for 3s before takeoff so OFFBOARD stays active
-        log("Pre-streaming hold setpoint (3s)...")
-        node.stream_sp(hx, hy, hz, 0.0, 3.0)
-
-        # Climb to hover altitude
-        log(f"Climbing to {hover_z:.2f}m...")
-        reached = node.fly_to(hx, hy, hover_z, 0.0, timeout=TAKEOFF_TIMEOUT_S)
-        if not reached:
-            log("[WARN] Takeoff altitude not reached within timeout — landing")
-        else:
-            log(f"Hover altitude reached — holding for {HOVER_DWELL_S}s")
-            node.stream_sp(hx, hy, hover_z, 0.0, HOVER_DWELL_S)
-
-        log("Hover test complete — switching to AUTO.LAND")
-        node.set_mode("AUTO.LAND")
-
-        log("Waiting for landing and disarm...")
-        while node.armed:
-            time.sleep(0.5)
-
+        log("[MODE 3] Aborting — No waypoints or home position — switching to AUTO.RTL")
+        node.set_mode("AUTO.RTL")
         _stop_camera(cam)
         stop_proc("Bag recorder",      bag_proc)
         stop_proc("Collision monitor", collision_proc)
-        if bridge_proc is not None:
-            stop_proc("SLAM bridge", bridge_proc)
+        stop_proc("SLAM bridge",       bridge_proc)
         stop_proc("Point-LIO",         pointlio_proc)
         if hailo_proc:
             stop_proc("Hailo flight node", hailo_proc)
@@ -1270,7 +1176,6 @@ def main() -> None:
 
     def _shutdown(signum=None, frame=None) -> None:
         log("Shutdown signal received")
-        streamer.stop()
         clear_lock()
         _clear_main_status()
         node.shutdown()
@@ -1281,11 +1186,6 @@ def main() -> None:
 
     current_mode   = FlightMode.IDLE
     debounce_start = None
-
-    # Start background setpoint streamer immediately so PX4 sees a valid
-    # stream before the operator switches to OFFBOARD mode.
-    streamer = SetpointStreamer(node)
-    streamer.start()
 
     while True:
         armed  = node.armed
@@ -1298,9 +1198,7 @@ def main() -> None:
                     log_mode(FlightMode.IDLE,
                              "Armed, LiDAR absent → MODE 1 (no scan)")
                     current_mode = FlightMode.NO_SCAN
-                    streamer.stop()
                     handle_no_scan(node)
-                    streamer.start()
                     current_mode = FlightMode.IDLE
                     clear_lock()
                     _write_main_status()
@@ -1331,9 +1229,7 @@ def main() -> None:
                          "OFFBOARD detected — committing MODE 3 (autonomous)")
                 current_mode   = FlightMode.AUTONOMOUS
                 debounce_start = None
-                streamer.stop()
                 handle_autonomous(node)
-                streamer.start()
                 current_mode = FlightMode.IDLE
                 clear_lock()
 
@@ -1343,9 +1239,7 @@ def main() -> None:
                          f"committing MODE 2 (manual scan)")
                 current_mode   = FlightMode.MANUAL
                 debounce_start = None
-                streamer.stop()
                 handle_manual_scan(node)
-                streamer.start()
                 current_mode = FlightMode.IDLE
 
             else:

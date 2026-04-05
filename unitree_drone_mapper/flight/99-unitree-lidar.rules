@@ -1,0 +1,44 @@
+# 99-unitree-lidar.rules
+# Unitree L1 LiDAR — Silicon Labs CP2104 USB-to-UART Bridge
+# Vendor: 10c4  Product: ea60
+#
+# PURPOSE
+# -------
+# Restarts pointlio-standby.service whenever the LiDAR USB device is
+# enumerated by the kernel. This handles two cases:
+#
+#   1. Normal boot with LiDAR already connected — service starts as usual
+#      via WantedBy=dev-ttyUSB0.device, but this rule also fires as a
+#      belt-and-suspenders restart once the device is fully settled.
+#
+#   2. LiDAR connected after boot (forgotten cable, hot-plug) — without
+#      this rule, pointlio-standby.service would remain inactive because
+#      the dev-ttyUSB0.device dependency was not satisfied at boot time.
+#      This rule fires systemctl restart, which re-evaluates all
+#      dependencies against the now-present device.
+#
+# MATCH STRATEGY
+# --------------
+# Matched by USB vendor ID (10c4) and product ID (ea60) rather than by
+# device node path (/dev/ttyUSB0). This is more robust: the rule fires
+# correctly even if enumeration order shifts due to other USB devices
+# being added or removed. Only one CP2104 device is present on this
+# system (confirmed via lsusb), so the match is unambiguous.
+#
+# INSTALL
+# -------
+# sudo cp 99-unitree-lidar.rules /etc/udev/rules.d/
+# sudo udevadm control --reload-rules
+# sudo udevadm trigger
+#
+# VERIFY
+# ------
+# udevadm test $(udevadm info --query=path --name=/dev/ttyUSB0) 2>&1 | grep RUN
+
+ACTION=="add", \
+SUBSYSTEM=="tty", \
+ATTRS{idVendor}=="10c4", \
+ATTRS{idProduct}=="ea60", \
+TAG+="systemd", \
+ENV{SYSTEMD_WANTS}="pointlio-standby.service", \
+RUN+="/bin/systemctl restart pointlio-standby.service"

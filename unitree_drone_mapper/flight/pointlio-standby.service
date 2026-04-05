@@ -1,11 +1,12 @@
 [Unit]
-Description=Point-LIO SLAM Standby — pre-arm map initialisation
-# Start only after the LiDAR USB device has been enumerated by udev.
-# This ensures /dev/ttyUSB0 exists and the device has settled before
-# Point-LIO attempts to open the serial port.
+Description=Point-LIO SLAM Standby — pre-arm map initialisation with health monitoring
+# Bind to the Unitree L1 LiDAR USB device (Silicon Labs CP2104, 10c4:ea60).
+# BindsTo ensures the service stops if the device is removed mid-session.
+# After ensures systemd waits for device enumeration before starting.
+# The 99-unitree-lidar.rules udev rule handles the reverse: restarting this
+# service when the device is plugged in after boot.
 BindsTo=dev-ttyUSB0.device
 After=dev-ttyUSB0.device
-StopWhenUnneeded=yes
 
 # Also wait for MAVROS so the SLAM bridge can begin publishing vision
 # pose to EKF2 from the moment Point-LIO has a map.
@@ -16,38 +17,59 @@ Wants=mavros.service
 Type=simple
 User=dronepi
 
-# 3-second delay after USB enumeration — lets the Unitree L1 firmware
-# complete its startup sequence before Point-LIO opens the serial port.
-# Without this, Point-LIO may fail on the first open() and exit immediately.
+# 3-second delay after USB enumeration — allows the Unitree L1 firmware to
+# complete its startup sequence before the health check wrapper opens the
+# serial port. Without this, the first open() may fail and cause an
+# immediate restart loop at a faster rate than the firmware can recover.
 ExecStartPre=/bin/sleep 3
 
+# ExecStart points to the health check wrapper rather than the launch file
+# directly. The wrapper:
+#   1. Launches Point-LIO as a subprocess
+#   2. Subscribes to /aft_mapped_to_init via a minimal rclpy node
+#   3. Exits with code 1 (triggering Restart=on-failure) if:
+#        - No first message arrives within FIRST_SCAN_TIMEOUT_S (90s)
+#        - Topic goes silent for SILENCE_TIMEOUT_S (15s) after publishing started
+#   4. Exits with code 0 on clean systemd stop (SIGINT forwarded cleanly)
+#
+# Environment variables allow timeout tuning without editing this file:
+#   POINTLIO_FIRST_SCAN_TIMEOUT=90   (seconds to wait for first scan)
+#   POINTLIO_SILENCE_TIMEOUT=15      (seconds of silence before restart)
 ExecStart=/bin/bash -c "\
     source /opt/ros/jazzy/setup.bash && \
     source /home/dronepi/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash && \
-    ros2 launch \
-    /home/dronepi/unitree_lidar_project/RPI5/ros2_ws/src/point_lio_ros2/launch/combined_lidar_mapping.launch.py \
-    rviz:=false port:=/dev/ttyUSB0"
+    python3 /home/dronepi/unitree_lidar_project/unitree_drone_mapper/flight/pointlio_health_check.py"
 
-# Stop the service if the LiDAR USB device is removed.
-# This prevents Point-LIO from spinning with no sensor input
-# and ensures a clean restart when the LiDAR is reconnected.
-
-
-# Restart on failure (e.g. serial port error) but not on clean stop.
-# RestartSec gives the LiDAR firmware time to recover between attempts.
+# Restart on failure (exit code 1 from health check, or unexpected Point-LIO crash).
+# Do NOT restart on clean stop (exit code 0) — that is a deliberate systemd stop.
 Restart=on-failure
-RestartSec=5
 
-# Allow Point-LIO up to 15 seconds to shut down cleanly on stop.
+# RestartSec gives the LiDAR firmware time to settle between restart attempts.
+# 10 seconds is long enough for the CP2104 serial port to fully close and
+# re-open without the firmware getting confused by rapid reconnections.
+RestartSec=10
+
+# Allow up to 3 restart attempts within a 5-minute window before systemd
+# gives up and marks the service as failed. This prevents an infinite
+# restart loop if the LiDAR has a hardware fault.
+# To reset the failure counter: sudo systemctl reset-failed pointlio-standby
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Allow Point-LIO up to 20 seconds to shut down cleanly on stop.
 # Point-LIO flushes its map and closes the serial port on SIGINT.
-# SIGKILL is sent after this timeout if it has not exited.
-TimeoutStopSec=15
+# The health check wrapper handles the SIGINT forwarding — SIGKILL is
+# sent by systemd only if the wrapper itself hangs beyond this timeout.
+TimeoutStopSec=20
+KillSignal=SIGINT
+KillMode=control-group
 
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pointlio-standby
 
 [Install]
-# Start when the LiDAR USB device appears — not at boot.
-# Plug in the LiDAR → service starts. Unplug → service stops.
+# Start when the LiDAR USB device appears — not at multi-user.target boot.
+# Plug in the LiDAR → udev rule fires → service starts.
+# The udev rule (99-unitree-lidar.rules) handles the hot-plug case.
 WantedBy=dev-ttyUSB0.device

@@ -208,41 +208,40 @@ class PoseInterpolator:
         p0: np.ndarray, p1: np.ndarray, alpha: float
     ) -> np.ndarray:
         """
-        LERP translation + SLERP rotation between two 4×4 poses.
+        LERP translation + SLERP rotation between two 4x4 poses.
 
-        Parameters
-        ----------
-        p0, p1 : np.ndarray, shape (4, 4)
-            Start and end poses (homogeneous transforms).
-        alpha : float
-            Interpolation parameter.  0.0 → p0, 1.0 → p1.
-            Values outside [0, 1] produce extrapolation.
+        alpha = 0.0 -> p0, 1.0 -> p1.  Values outside [0,1] extrapolate.
 
-        Returns
-        -------
-        np.ndarray, shape (4, 4)
-            Interpolated pose as a valid homogeneous transform.
+        Design note — extrapolation
+        ---------------------------
+        scipy.spatial.transform.Slerp enforces times in [0.0, 1.0] and
+        raises ValueError for any value outside that range, including
+        modest values like 1.03 from a 30 ms extrapolation window.
 
-        Design note — why SLERP over LERP for rotation
-        -----------------------------------------------
-        Linearly interpolating rotation matrices (or their elements)
-        does not preserve orthogonality: the result is not a valid
-        rotation matrix.  SLERP operates on the SO(3) manifold and
-        always produces a valid rotation at uniform angular velocity,
-        which is physically correct for a rigid body moving between
-        two sampled poses.
+        For alpha > 1 we extend manually:
+          R_extra = Rotation.from_rotvec(rotvec(R1*R0.inv()) * excess) * R1
+        This continues rotating past R1 at the same angular velocity and
+        always stays on SO(3).  Symmetric formula for alpha < 0.
         """
-        # Translation: linear interpolation is sufficient
         t_interp = (1.0 - alpha) * p0[:3, 3] + alpha * p1[:3, 3]
 
-        # Rotation: SLERP via scipy
-        # Slerp requires at least two distinct rotations and a times array.
-        R0 = Rotation.from_matrix(p0[:3, :3])
-        R1 = Rotation.from_matrix(p1[:3, :3])
-        slerp    = Slerp([0.0, 1.0], Rotation.concatenate([R0, R1]))
-        R_interp = slerp(float(np.clip(alpha, -0.5, 1.5))).as_matrix()
+        R0      = Rotation.from_matrix(p0[:3, :3])
+        R1      = Rotation.from_matrix(p1[:3, :3])
+        alpha_f = float(alpha)
 
-        result           = np.eye(4, dtype=np.float64)
-        result[:3, :3]   = R_interp
-        result[:3,  3]   = t_interp
+        if 0.0 <= alpha_f <= 1.0:
+            slerp    = Slerp([0.0, 1.0], Rotation.concatenate([R0, R1]))
+            R_interp = slerp(alpha_f).as_matrix()
+        elif alpha_f > 1.0:
+            excess   = alpha_f - 1.0
+            R_rel    = R1 * R0.inv()
+            R_interp = (Rotation.from_rotvec(R_rel.as_rotvec() * excess) * R1).as_matrix()
+        else:
+            excess   = -alpha_f
+            R_rel    = R0 * R1.inv()
+            R_interp = (Rotation.from_rotvec(R_rel.as_rotvec() * excess) * R0).as_matrix()
+
+        result         = np.eye(4, dtype=np.float64)
+        result[:3, :3] = R_interp
+        result[:3,  3] = t_interp
         return result

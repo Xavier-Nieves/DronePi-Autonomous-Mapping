@@ -2,10 +2,9 @@
 
 **Document:** 9 of 9 (supplementary)
 **Repo path:** `docs/texture_pipeline.md`
-**Last updated:** March 2026
+**Last updated:** April 2026
 **Project:** DronePi — Autonomous LiDAR Mapping Drone — UPRM Capstone
-**Status:** Planned — camera hardware pending reinstall. All design and code
-is written. This document is ready to execute once the IMX477 is online.
+**Status:** Integrated and ready for real-bag validation. The IMX477 camera is installed, the texture stage is wired into `postprocess_mesh.py`, and the remaining work is first-flight validation and final viewer verification.
 
 ---
 
@@ -42,11 +41,11 @@ fully textured deliverable is produced.
 
 **Prerequisites before this pipeline can run:**
 
-- IMX477 camera reinstalled and confirmed publishing via `libcamera-hello`
+- IMX477 camera installed and publishing to the configured image topic
 - Camera intrinsic calibration verified — see `docs/calibration.md`
 - Extrinsic calibration values confirmed in `config/camera_calibration.yaml`
-- `test_texture_live.py` code-audited to confirm extrinsic is not identity
-- PX4 camera trigger configured in QGroundControl (see section 10)
+- `texture_tools/` modules present in the runtime environment
+- A rosbag containing both camera frames and SLAM poses for replay
 
 ---
 
@@ -88,7 +87,7 @@ ArducamNode
   v
 TextureNode
   | subscribes to /arducam/image_raw
-  | subscribes to /slam/odometry (pose history)
+  | subscribes to /aft_mapped_to_init (pose history)
   |
   | for each frame:
   |   PoseInterpolator.get_pose_at(timestamp)
@@ -119,7 +118,7 @@ finished mesh.
 | Topic | Type | Rate | Publisher | Subscriber |
 |---|---|---|---|---|
 | `/arducam/image_raw` | `sensor_msgs/Image` | 30 Hz | ArducamNode | TextureNode |
-| `/slam/odometry` | `nav_msgs/Odometry` | ~250 Hz | Point-LIO | TextureNode |
+| `/aft_mapped_to_init` | `nav_msgs/Odometry` | ~250 Hz | Point-LIO | TextureNode |
 | `/textured_cloud` | `sensor_msgs/PointCloud2` | on update | TextureNode | RViz2 |
 | `/mavros/cam_imu_sync/cam_imu_stamp` | `mavros_msgs/CamIMUStamp` | per trigger | MAVROS | ArducamNode |
 
@@ -341,36 +340,30 @@ test) has already been validated and is ready to be integrated into this class.
 
 ## 9. Integration with Post-Processing Pipeline
 
-The texture step is added as a seventh stage to `postprocess_mesh.py` after
-the existing six stages, gated by camera availability.
+The texture step is already wired into `postprocess_mesh.py` as Stage 6, with publish moved to Stage 7. It is gated by the same camera/data checks used elsewhere in the stack.
 
-Planned addition to the orchestrator:
+Current orchestrator behavior:
 
 ```python
-# Stage 7 — Texture projection (requires camera)
-if camera_available and images_dir:
-    from mesh_tools.texture_projector import TextureProjectionStage
-    log("[7/7] Projecting texture onto mesh...")
-    texturer = TextureProjectionStage(
-        calibration_path='config/camera_calibration.yaml'
-    )
-    textured_mesh = texturer.project(
+# Stage 6 — Texture projection (optional, non-fatal)
+if not no_texture and mesh is not None and camera_enabled:
+    textured_mesh = texture_stage.run(
         mesh=combined_mesh,
-        bag_path=bag_path,        # reads image frames from bag
-        pose_topic='/aft_mapped_to_init',
-        image_topic='/arducam/image_raw'
+        bag_path=bag_path,
+        pose_topic="/aft_mapped_to_init",
+        image_topic="/arducam/image_raw",
+        calibration_path="config/camera_calibration.yaml",
     )
-    publisher.publish_textured(textured_mesh)
 else:
-    log("[7/7] Camera not available — skipping texture projection")
+    log("[6/7] Texture projection skipped — publishing grey mesh")
+
+# Stage 7 — Publish
+publisher.publish(...)
 ```
 
-The stage is skipped entirely if no camera data is present in the bag,
-preserving backward compatibility with all existing scans.
+The stage is skipped automatically if camera data is missing, the mesh was not built, `--no-texture` is passed, or calibration is unavailable. Backward compatibility is preserved for older non-camera bags.
 
-The output file is `textured_mesh.ply` alongside the existing `mesh_final.ply`.
-The browser viewer will detect the presence of `textured_mesh.ply` in
-`metadata.json` and offer it as a fourth toggle in the mesh controls.
+The output file is `textured_mesh.ply` alongside the existing `mesh_final.ply`. The viewer logic now prioritizes `textured_mesh.ply` when present and falls back cleanly to the untextured mesh.
 
 ---
 
@@ -575,18 +568,13 @@ use the conda-forge version which has a confirmed ARM64 wheel.
 
 ## 14. Remaining Work
 
-All code is written and the pipeline is architecturally complete. The
-following tasks remain before the first textured output can be produced.
+The texture pipeline is no longer blocked by camera installation. The remaining work is execution validation, not architecture.
 
 | Task | Blocked by | Notes |
 |---|---|---|
-| Camera remount | Arducam CSI-to-HDMI kit arrival | Physical reinstall on sensor plate |
-| `libcamera-hello` signal test | Camera remount | Confirm no `chip id 477, error -5` |
-| Intrinsic calibration verification | Camera online | Confirm RMS still below 2.0 at current focal setting |
-| Extrinsic code audit in `test_texture_live.py` | None — can do now | Confirm `[-0.070, 0.000, 0.030]` is used, not identity |
-| PX4 trigger configuration | Camera online | Set `TRIG_MODE=4`, verify `/mavros/cam_imu_sync` publishes |
-| First capture flight | All above | Short 60s flight at ~10m AGL over simple structure |
-| Verify image-to-pose timestamp match | First flight bag | Each image must have a matching pose within 5ms |
-| Integrate TextureProjector into `postprocess_mesh.py` as stage 7 | Camera online | Add gated stage, output `textured_mesh.ply` |
-| Update `meshview.html` to toggle textured mesh | Stage 7 complete | Add fourth toggle button, load vertex colors as RGB |
-| Full survey flight with texture | Integration complete | Capstone demo deliverable |
+| Real-bag Stage 6 run | Suitable camera+SLAM rosbag | First full end-to-end textured output on a real flight bag |
+| Intrinsic calibration verification | Camera online | Confirm current focus setting still matches the stored calibration |
+| Timestamp validation | First textured bag | Verify each used image has a matching SLAM pose within the replay tolerance |
+| Extrinsic refinement, if needed | First textured bag | Only if color alignment shows consistent offset or rotation error |
+| Viewer verification on Pi | First textured output | Confirm `meshview.html` prefers `textured_mesh.ply` and renders vertex colors correctly |
+| Full survey flight with texture | End-to-end validation complete | Capstone demo deliverable |

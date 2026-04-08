@@ -11,58 +11,68 @@
 
 DronePi is a capstone engineering project that builds a fully autonomous drone capable of flying a GPS survey mission over a target structure, capturing LiDAR geometry and pose simultaneously, and producing a textured 3D mesh viewable in a browser — with zero manual steps required between landing and mesh display.
 
-The system runs entirely on a Raspberry Pi 5 companion computer with no cloud dependency. All processing, serving, and visualization happens on the drone itself or on a laptop connected to its local Wi-Fi hotspot.
+The core mapping pipeline runs entirely on a Raspberry Pi 5 companion computer and remains usable with no cloud dependency. All local processing, serving, and visualization happen on the drone itself or on a laptop connected to its local Wi-Fi hotspot. An optional Foxglove cloud layer now exists for post-flight recording upload and replay, but it is additive and does not gate the local deliverable path.
 
 ---
 
 ## System Architecture
 
-The full pipeline flows through seven layers, from raw hardware input to browser-rendered 3D output.
+The full pipeline now flows through eight layers, from raw hardware input to browser-rendered 3D output, with an optional Foxglove cloud sync layer after local publish.
 
 ```
 Hardware Layer
   Pixhawk 6X (flight controller)
   Unitree 4D L1 (LiDAR sensor)
-  M9N GPS (>=10 sats, HDOP <1.2)
-  IMX477 camera 
+  M9N GPS (secondary augmentation / geotagging)
+  IMX477 camera (installed, capture path active)
+  Hailo-8 HAT+ (optical flow / ground class path written)
         |
         v
 ROS 2 + MAVROS Bridge
-  MAVROS              /mavros/state + /cmd/arming
-  Point-LIO SLAM      /cloud_registered + /aft_mapped
-  SLAM bridge         ENU -> NED -> /mavros/vision_pose/pose
+  MAVROS              /mavros/state + mission + tuning topics
+  Point-LIO SLAM      /cloud_registered + /aft_mapped_to_init
+  SLAM bridge         /mavros/vision_pose/pose + /mavros/odometry/out
+  collision_monitor   obstacle zones + downward range estimate
         |
         v
 Flight Stack (Pi 5, Ubuntu 24.04)
-  drone_watchdog.py   WAITING -> ACTIVE -> WAITING state machine
-  ros2 bag record     /cloud_registered + 5 other topics -> .mcap
-  preflight_check.sh  17 sections, 63 checks (services, FCU, LiDAR)
+  drone_watchdog.py   stack supervisor + postflight trigger + LED/buzzer IPC
+  main.py             MODE 1 / MODE 2 / MODE 3 orchestrator
+  camera_capture.py   persistent IMX477 capture with waypoint trigger
+  ros2 bag record     LiDAR + SLAM + MAVROS + camera/Hailo topics -> .mcap
         |
         v
 Post-Processing Pipeline
   run_postflight.py       finds latest bag, triggers pipeline
-  postprocess_mesh.py     6-stage orchestrator
+  postprocess_mesh.py     7-stage orchestrator
   flight_logger.py        flight_history.log entry
         |
         v
-mesh_tools/ — Modular Pipeline Modules
-  BagReader        .mcap -> Nx3 point array
-  MLSSmoother      noise removal (Moving Least Squares)
-  GroundClassifier SMRF / Z-percentile split
-  DTMBuilder       Delaunay 2.5D terrain mesh
-  DSMBuilder       Ball Pivoting surface mesh
-  Publisher        PLY + JSON outputs
+mesh_tools + texture_tools
+  BagReader          .mcap -> point array
+  MLSSmoother        noise removal
+  GroundClassifier   SMRF terrain split
+  DTMBuilder         Delaunay 2.5D ground mesh
+  DSMBuilder         Ball Pivoting surface mesh
+  MeshMerger         merges DTM + DSM
+  TextureProjection  camera replay -> per-vertex color
+  Publisher          mesh_final.ply / textured_mesh.ply + JSON outputs
         |
         v
 Outputs + HTTP Serving
-  PLY outputs        combined_cloud.ply, mesh_final, dtm, dsm
+  PLY outputs        combined_cloud.ply, mesh_final.ply, textured_mesh.ply
   JSON manifests     metadata.json per session, latest.json for browser poll
   serve.py           HTTP port 8080, /api/flights + static PLY
         |
         v
 3D Viewers
-  meshview.html      Pi browser viewer, polls latest.json every 10s
+  meshview.html      Pi browser viewer, live + mesh tabs
   local_test.html    offline laptop viewer, drag-and-drop flight folder
+        |
+        v
+Optional Foxglove Cloud Sync
+  foxglove_bridge    live ROS 2 websocket viewer (:8765)
+  foxglove-agent     post-flight MCAP upload / cloud replay (verification pending)
 ```
 
 All services start automatically on boot via systemd: hotspot, mesh-server, foxglove bridge, MAVROS, and drone-watchdog — no user interaction required after power-on.
@@ -77,8 +87,8 @@ All services start automatically on boot via systemd: hotspot, mesh-server, foxg
 | Flight controller | Pixhawk 6X (PX4 firmware) | Stabilization, OFFBOARD control |
 | LiDAR | Unitree 4D L1 | 360-degree LiDAR-inertial SLAM |
 | GPS | M9N | Global position for survey missions |
-| Camera | IMX477 (RPi HQ) | Texture capture — pending reinstall |
-| AI accelerator | Hailo-8 HAT+ (26 TOPS) | Future inference pipeline |
+| Camera | IMX477 (RPi HQ) | Installed; waypoint-triggered capture and texturing pipeline input |
+| AI accelerator | Hailo-8 HAT+ (26 TOPS) | Inference hardware validated; FlowBridge integration path written |
 | Storage | SanDisk Extreme 1 TB SSD (USB 3.0) | Rosbag and mesh output storage |
 
 ---
@@ -92,6 +102,7 @@ All services start automatically on boot via systemd: hotspot, mesh-server, foxg
 | MAVROS | ros-jazzy-mavros | MAVLink bridge |
 | Point-LIO | built from source | LiDAR-inertial SLAM |
 | foxglove_bridge | 3.2.3 | ROS 2 WebSocket for Foxglove Studio |
+| Foxglove Agent | 1.4.7 | Optional post-flight MCAP upload to Foxglove cloud (verification pending) |
 | Open3D | 0.19.0 (conda-forge) | MLS smoothing, BPA mesh |
 | PDAL | 3.5.3 (conda-forge) | SMRF ground classification |
 | pymeshlab | ARM64 wheel | Mesh processing fallback |
@@ -120,20 +131,25 @@ unitree_lidar_project/
 │       ├── mavros_reader.py           ROS 2 MAVROS interface
 │       ├── flight_stack.py            Subprocess manager (Point-LIO, bridge, bag)
 │       ├── postflight.py              Monitored post-flight trigger + log pipe
-│       └── led_controller.py          External RGB LED state machine (pending wiring)
+│       └── led_controller.py          Canonical LED state definitions
 ├── tests/
 │   ├── test_offboard_flight.py        OFFBOARD hover test
 │   ├── test_offboard_gps.py           GPS waypoint mission test
 │   ├── test_manual_scan.py            Manual RC flight + LiDAR scan
 │   ├── test_slam_bridge_flight.py     SLAM bridge validation flight
 │   ├── collision_zone_test.py         Zone characterization + PLY export
-│   └── test_mesh_algorithms.py        Poisson vs BPA vs Delaunay comparison
+│   ├── test_mesh_algorithms.py        Poisson vs BPA vs Delaunay comparison
+│   ├── test_texture_projection.py     Texture replay / projection validation
+│   └── test_hover_camera.py           Hover-square camera + LiDAR sync integration test
 ├── utils/
-│   ├── postprocess_mesh.py            6-stage mesh pipeline orchestrator
+│   ├── postprocess_mesh.py            7-stage mesh pipeline orchestrator
 │   ├── run_postflight.py              Post-flight trigger script
 │   ├── flight_logger.py               Persistent flight history log
 │   ├── bench_test.py                  MAVROS pipeline bench test (8 checks)
-│   └── mesh_tools/
+│   ├── foxglove_events.py             Foxglove post-flight Events client
+│   ├── foxglove_cloud_rotation.py     Cloud recording retention policy
+│   ├── postflight_ipc.py              Pipeline stage IPC for LED/buzzer feedback
+│   ├── mesh_tools/
 │       ├── bag_reader.py
 │       ├── mls_smoother.py
 │       ├── ground_classifier.py
@@ -141,6 +157,11 @@ unitree_lidar_project/
 │       ├── dsm_builder.py
 │       ├── mesh_merger.py
 │       └── publisher.py
+│   └── texture_tools/
+│       ├── camera_model.py
+│       ├── pose_interpolator.py
+│       ├── texture_projector.py
+│       └── texture_stage.py
 ├── config/
 │   ├── px4_config.yaml
 │   ├── px4_pluginlists.yaml
@@ -211,16 +232,16 @@ Key QGC parameters: `EKF2_EV_CTRL=15` (all vision bits), `EKF2_HGT_REF=3` (SLAM 
 
 ## Post-Processing Pipeline
 
-After every disarm, `run_postflight.py` automatically finds the latest rosbag and runs the six-stage mesh pipeline:
+After every disarm, `run_postflight.py` automatically finds the latest rosbag and runs the current seven-stage mesh pipeline:
 
 ```
-BagReader -> MLSSmoother -> GroundClassifier -> DTMBuilder -> DSMBuilder -> Publisher
-.mcap->Nx3   noise removal   SMRF/Z-pct         Delaunay 2.5D  Ball Pivoting  PLY+JSON
+BagReader -> MLSSmoother -> GroundClassifier -> DTMBuilder -> DSMBuilder -> MeshMerger -> TextureProjection -> Publisher
+.mcap->pts    denoise         terrain split      ground mesh    surface mesh   merge           per-vertex RGB      PLY+JSON
 ```
 
 All stages are independent classes following the project's modular architecture principle. The orchestrator (`postprocess_mesh.py`) supports CLI flags for tuning resolution, skipping stages, and selecting algorithms.
 
-Results are served immediately at `http://10.42.0.1:8080/meshview.html`. The browser viewer polls `latest.json` every 10 seconds and auto-loads new meshes.
+Results are served immediately at `http://10.42.0.1:8080/meshview.html`. When Stage 6 succeeds, `textured_mesh.ply` is published alongside `mesh_final.ply`; if texture projection is skipped or fails, the grey mesh path remains valid and the pipeline still completes.
 
 ---
 
@@ -303,10 +324,9 @@ All pipeline stages in this project follow a consistent modular design:
 ## Known Limitations
 
 - OFFBOARD flight has been demonstrated once but is not yet consistent due to GPS satellite geometry constraints at the UPRM campus. An open field with at least 10 satellites and HDOP below 1.2 is required.
-- The IMX477 camera is dismounted pending arrival of an Arducam CSI-to-HDMI extension kit. The texture mapping pipeline is written but untested against real imagery.
-- The Hailo-8 AI HAT is present and powered but has no pipeline integration in the current release. Integration is planned post-demo.
-- The external RGB LED controller (`led_controller.py`) is fully designed and documented but pending physical GPIO wiring.
-
+- The texture mapping pipeline is written but untested against real imagery.
+- The Hailo-8 AI HAT is present and powered but has no pipeline integration in the current release. I
+- The external RGB LED controller (`led_controller.py`) is fully designed and documented 
 ---
 
 ## License

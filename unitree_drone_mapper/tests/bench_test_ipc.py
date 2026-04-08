@@ -147,96 +147,125 @@ def clear_all() -> None:
 # ── State definitions ─────────────────────────────────────────────────────────
 # Each entry: (description, led_colour_hint, setup_fn, hold_s)
 
+def _clear_side_files() -> None:
+    """Clear every IPC file that is NOT being explicitly set by the current
+    state. Called at the top of every setup function so stale files from a
+    previous state (or from a real pipeline run) never bleed into the test."""
+    Path(POSTFLIGHT_STATUS).unlink(missing_ok=True)
+    Path(MISSION_LOCK).unlink(missing_ok=True)
+    Path(MAIN_STATUS).unlink(missing_ok=True)
+
+
 def _state_off():
     clear_all()
 
 def _state_booting():
+    _clear_side_files()
     write_watchdog(
         fcu=False, led_state="SYSTEM_START",
         led_until=_ts() + 5.0
     )
 
 def _state_waiting_fcu():
+    _clear_side_files()
     write_watchdog(fcu=False)
 
 def _state_idle():
+    _clear_side_files()
     write_watchdog(fcu=True)
 
 def _state_scan_ready():
+    _clear_side_files()
     write_watchdog(fcu=True, led_state="SCAN_READY", led_until=_ts() + 5.0)
 
 def _state_scan_start():
+    _clear_side_files()
     write_watchdog(fcu=True, led_state="SCAN_START", led_until=_ts() + 5.0)
 
 def _state_scanning_manual():
+    _clear_side_files()
     write_watchdog(fcu=True, armed=True, stack_running=True)
     write_lock("manual_scan")
 
 def _state_scanning_auto():
+    _clear_side_files()
     write_watchdog(fcu=True, armed=True, stack_running=False)
     write_lock("autonomous")
     write_main()
 
 def _state_scan_finished():
+    _clear_side_files()
     write_watchdog(fcu=True, led_state="SCAN_FINISHED", led_until=_ts() + 5.0)
-    Path(MISSION_LOCK).unlink(missing_ok=True)
 
 def _state_processing():
+    _clear_side_files()
     write_watchdog(fcu=True, processing=True)
-    Path(MISSION_LOCK).unlink(missing_ok=True)
 
 def _state_pf_running_extract():
+    _clear_side_files()
     write_watchdog(fcu=True, processing=True)
     write_postflight("bag_extract")
 
 def _state_pf_running_classify():
+    _clear_side_files()
     write_watchdog(fcu=True, processing=True)
     write_postflight("ground_classify")
 
 def _state_pf_running_dtm():
+    _clear_side_files()
     write_watchdog(fcu=True, processing=True)
     write_postflight("dtm")
 
 def _state_pf_running_dsm():
+    _clear_side_files()
     write_watchdog(fcu=True, processing=True)
     write_postflight("dsm")
 
 def _state_pf_done():
+    _clear_side_files()
     write_watchdog(fcu=True)
     write_postflight("publish", done=True)
 
 def _state_pf_failed():
+    _clear_side_files()
     write_watchdog(fcu=True)
     write_postflight("dsm", failed=True)
 
 def _state_hailo_active():
+    _clear_side_files()
     write_watchdog(fcu=True, armed=True, stack_running=False)
     write_lock("autonomous")
     write_main(hailo_active=True)
 
 def _state_hailo_degraded():
+    _clear_side_files()
     write_watchdog(fcu=True, armed=True, stack_running=False)
     write_lock("autonomous")
     write_main(hailo_active=True, hailo_degraded=True)
 
 def _state_hailo_failed():
+    _clear_side_files()
     write_watchdog(fcu=True)
     write_main(hailo_failed=True)
 
 def _state_warning():
+    _clear_side_files()
     write_watchdog(fcu=True, warning=True)
 
 def _state_error():
+    _clear_side_files()
     write_watchdog(fcu=True, error=True)
 
 def _state_critical():
+    _clear_side_files()
     write_watchdog(fcu=True, armed=True, critical=True)
 
 def _state_system_failure():
+    _clear_side_files()
     write_watchdog(fcu=True, system_failure=True)
 
 def _state_watchdog_dead():
-    # Write a heartbeat with a timestamp far in the past
+    _clear_side_files()
     payload = json.dumps({
         "ts": _ts() - 30.0,   # 30s stale — well past WATCHDOG_DEAD_S=5
         "fcu": True, "armed": False, "processing": False,
@@ -247,6 +276,7 @@ def _state_watchdog_dead():
     Path(WATCHDOG_STATUS).write_text(payload)
 
 def _state_main_dead():
+    _clear_side_files()
     write_watchdog(fcu=True)
     write_lock("autonomous")
     payload = json.dumps({
@@ -439,7 +469,12 @@ def _activate_state(name: str, buzzer: BuzzerPublisher | None, hold_s: float = 3
 
     if hold_s > 0:
         _log(f"  Holding {hold_s:.0f}s — watch LED ...", _DIM)
-        time.sleep(hold_s)
+        # Refresh IPC files every 80ms so the live watchdog (10Hz writer)
+        # cannot overwrite the test state during the hold window.
+        deadline = time.time() + hold_s
+        while time.time() < deadline:
+            setup_fn()
+            time.sleep(0.08)
 
 
 def _play_tone(tone_name: str, buzzer: BuzzerPublisher) -> None:

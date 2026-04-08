@@ -219,16 +219,19 @@ class PostflightBuzzerDriver:
         Pipeline done  → TUNE_POSTPROCESS_DONE + LED POSTFLIGHT_DONE  (green+yellow)
         Pipeline failed→ TUNE_ERROR            + LED POSTFLIGHT_FAILED (red 3 Hz)
 
-    The done/failed tones are still played by PostflightMonitor._monitor() when the
-    subprocess exits. PostflightBuzzerDriver only handles the stage transitions and
-    the running heartbeat tick — avoiding any double-play on completion.
+    The done/failed tones are played here directly from the IPC file so they
+    fire whether postprocess_mesh.py was launched by the watchdog or manually
+    from the terminal. _done_latched / _fail_latched prevent double-play if
+    PostflightMonitor._monitor() already fired the tone via subprocess exit.
     """
 
     def __init__(self, play_tune_fn: Callable[[str], None]) -> None:
-        self._play    = play_tune_fn
-        self._beeper  = PostflightBeeper(play_tune_fn)
-        self._last_stage: str  = ""
-        self._running:    bool = False
+        self._play          = play_tune_fn
+        self._beeper        = PostflightBeeper(play_tune_fn)
+        self._last_stage:   str  = ""
+        self._running:      bool = False
+        self._done_latched: bool = False   # True once done tone fired this session
+        self._fail_latched: bool = False   # True once fail tone fired this session
 
     def poll(self) -> None:
         """
@@ -256,23 +259,44 @@ class PostflightBuzzerDriver:
         done   = bool(data.get("done",   False))
 
         # ── pipeline ended (done or failed) ───────────────────────────────────
-        # Completion/failure tones are played by PostflightMonitor._monitor().
-        # We only need to stop our heartbeat beeper.
+        # Play the terminal tone here so it fires whether the pipeline was
+        # launched by the watchdog (PostflightMonitor._monitor()) or manually
+        # from the terminal. Latches prevent double-play if _monitor() already
+        # fired the tone via subprocess exit code.
         if done or failed:
             if self._running:
                 self._beeper.stop()
                 self._running    = False
                 self._last_stage = ""
+
+            if done and not self._done_latched:
+                self._done_latched = True
+                self._fail_latched = False
+                try:
+                    self._play(TUNE_POSTPROCESS_DONE)
+                except Exception:
+                    pass
+            elif failed and not self._fail_latched:
+                self._fail_latched = True
+                self._done_latched = False
+                try:
+                    self._play(TUNE_ERROR)
+                except Exception:
+                    pass
             return
 
         # ── pipeline running ───────────────────────────────────────────────────
         if not stage:
             return
 
-        # Start the background heartbeat tick on first stage detection
+        # Start the background heartbeat tick on first stage detection.
+        # Reset done/fail latches so each new pipeline session gets its own
+        # terminal tone regardless of what the previous run did.
         if not self._running:
             self._beeper.start()
-            self._running = True
+            self._running      = True
+            self._done_latched = False
+            self._fail_latched = False
 
         # Fire a one-shot stage-transition tone when the stage name changes
         if stage != self._last_stage:
@@ -287,8 +311,10 @@ class PostflightBuzzerDriver:
     def stop(self) -> None:
         """Stop all pipeline audio. Call on watchdog shutdown."""
         self._beeper.stop()
-        self._running    = False
-        self._last_stage = ""
+        self._running      = False
+        self._last_stage   = ""
+        self._done_latched = False
+        self._fail_latched = False
 
 
 # ── FaultAlarmManager ─────────────────────────────────────────────────────────

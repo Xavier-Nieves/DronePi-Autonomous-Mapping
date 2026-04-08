@@ -1,45 +1,36 @@
 # camera_calibration.yaml — IMX477 (ArduCam) intrinsic and extrinsic parameters
 #
 # Intrinsic calibration
-#   Tool    : OpenCV camera calibration (checkerboard, 9×6, 25mm squares)
-#   RMS     : 1.99 px  (acceptable threshold < 2.0 px)
-#   Date    : 2025 — re-run if lens or mount changes
+#   Tool : OpenCV checkerboard calibration (9x6, 25mm squares)
+#   RMS  : 1.99 px
 #
-# Extrinsic calibration (T_cam_body)
-#   Origin  : LiDAR (Unitree L2) sensor frame — this is the (0,0,0) reference
-#   Measured: physical ruler + sketch validation, confirmed 2026-04-05
+# Extrinsic — T_cam_body (body frame -> camera frame)
+#   Origin: LiDAR sensor frame = (0,0,0)
+#   Validated: physical ruler + sketch, 2026-04-05
 #
-# Coordinate frame (body / ENU convention)
-#   +X  forward  (Pixhawk arrow direction)
-#   +Y  left
-#   +Z  up
+# Body frame convention (+X fwd, +Y left, +Z up)
 #
-# Physical mount layout (top-down view, +X = up in that view)
-#
+# Physical mount (top-down):
 #         +X (Pixhawk fwd)
-#          ↑
-#    +Y ←  [LiDAR]   ← LiDAR at (0, 0, 0), looks down (–Z)
-#           |  0.070 m in –Y
-#          [Camera]  ← Camera, also looks down (–Z), yaw 180° vs LiDAR
+#          ^
+#   +Y <- [LiDAR]  (0, 0, 0)  looks down
+#           | 0.070m in -Y
+#         [Camera]             looks down, yaw-rotated vs LiDAR
 #
-# Translation [x, y, z] in metres, in body frame, origin = LiDAR:
-#   x =  0.000   same forward position as LiDAR
-#   y = -0.070   70 mm to the RIGHT of LiDAR (–Y = right in body frame)
-#   z = +0.030   30 mm ABOVE LiDAR origin
-#                (LiDAR hangs below mounting plate; camera sits higher)
+# Translation [x, y, z] metres, origin = LiDAR:
+#   x =  0.000   same forward position
+#   y = -0.070   70mm to the RIGHT of LiDAR (-Y = right)
+#   z = +0.030   30mm ABOVE LiDAR origin
 #
-# Rotation rotation_rpy [roll, pitch, yaw] in radians:
-#   roll  = 0.0      no roll
-#   pitch = 0.0      no pitch — both sensors face straight down (–Z)
-#   yaw   = π        camera rotated 180° about Z relative to LiDAR/body frame
-#                    Rz(π): [[-1,0,0],[0,-1,0],[0,0,1]]
-#                    Flips camera +X → –X and +Y → –Y.
-#                    Downward optical axis (–Z) is preserved — both sensors
-#                    still point at the ground.
+# Rotation RPY [roll, pitch, yaw] radians (scipy 'xyz' / ZYX convention):
+#   roll  = pi    Rx(pi): flips +Z up -> -Z down (optical axis toward ground)
+#   pitch = 0.0
+#   yaw   = pi    Rz(pi): flips +X fwd -> -X back (180 deg yaw vs LiDAR)
 #
-# SINGLE SOURCE OF TRUTH
-#   camera_model.py is the ONLY module that reads this file.
-#   Do NOT duplicate these values anywhere in config.yaml.
+#   Combined R = [[-1,0,0],[0,1,0],[0,0,-1]]
+#   cam +X -> backward, cam +Y -> left, cam +Z (optical) -> DOWN  (correct)
+#
+# SINGLE SOURCE OF TRUTH — camera_model.py is the only reader of this file.
 
 camera:
   image_width:  4056
@@ -48,13 +39,8 @@ camera:
   fy: 4773.894
   cx: 2008.339
   cy: 1478.886
-  # Distortion coefficients [k1, k2, p1, p2, k3]
   dist_coeffs: [-0.21973, 0.16747, 0.00039, -0.00060, -0.07611]
 
 extrinsic:
-  # Camera origin relative to LiDAR origin, expressed in body frame (metres)
-  translation: [0.0, -0.070, 0.030]
-
-  # RPY in radians, ZYX convention (scipy Rotation.from_euler('xyz', rpy))
-  # 180° yaw only — camera +X faces backward, optical axis still faces down
-  rotation_rpy: [0.0, 0.0, 3.14159265]
+  translation:   [0.0, -0.070, 0.030]
+  rotation_rpy:  [3.14159265, 0.0, 3.14159265]

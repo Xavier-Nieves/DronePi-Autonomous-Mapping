@@ -127,15 +127,19 @@ class PostflightMonitor:
         except Exception as exc:
             log(f"[POSTFLIGHT] Log pipe error: {exc}")
         finally:
-            # Stop the background heartbeat tick unconditionally
+            # Stop the background heartbeat tick.
+            # Terminal tones (TUNE_POSTPROCESS_DONE / TUNE_ERROR) are handled
+            # by PostflightBuzzerDriver.poll() which reads postflight_status.json
+            # written by PostflightIPC in postprocess_mesh.py. This fires for
+            # both watchdog-launched and manually-run postflight. Calling
+            # play_tune() here would double-play via watchdog and be silent
+            # when run manually — so we leave it entirely to poll().
             self._pf_buzzer.stop()
 
             if proc.returncode == 0:
                 log("[POSTFLIGHT] Processing complete")
-                self._reader.play_tune(TUNE_POSTPROCESS_DONE)
             else:
                 log(f"[POSTFLIGHT] Processing failed (exit {proc.returncode})")
-                self._reader.play_tune(TUNE_ERROR)
 
             with self._lock:
                 self._active = False

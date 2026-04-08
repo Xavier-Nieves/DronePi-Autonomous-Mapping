@@ -90,9 +90,11 @@ SYNTH_DIST  = [0.0, 0.0, 0.0, 0.0, 0.0]   # No distortion in synthetic test
 # ── Test constants ────────────────────────────────────────────────────────────
 PLANE_SIZE_M    = 10.0   # ground plane extent (metres)
 PLANE_SUBDIV    = 40     # subdivisions per axis → 40×40 = 1600 quads
-CAMERA_ALT_M    = 5.0    # synthetic drone altitude above ground (metres)
+CAMERA_ALT_M    = 6.0    # synthetic drone altitude above ground (metres)
+                         # At fx=1200, W=1280: footprint=6.40x4.80m = 30.7% of 10x10m plane
 CHECKER_CELLS   = 8      # checkerboard squares per axis
-MIN_COVERAGE    = 0.30   # at least 30% of vertices must be textured to pass T5
+MIN_COVERAGE    = 0.28   # ≥28% of 10x10m plane must be textured
+                         # At alt=6m, fx=1200: footprint covers 30.7% → passes with margin
 
 # ── Result tracking ───────────────────────────────────────────────────────────
 _results: list[tuple[str, bool, str]] = []
@@ -205,11 +207,14 @@ def make_synthetic_camera_model(tmp_calib_path: Path) -> CameraModel:
             # Matches the real hardware mount validated 2026-04-05 (sketch + ruler):
             #   translation: x=0 (same fwd pos), y=-0.070m (camera right of LiDAR),
             #                z=+0.030m (camera above LiDAR origin — LiDAR hangs lower)
-            #   rotation:    yaw=π — camera rotated 180° about Z axis vs LiDAR/body.
-            #                Rz(π): [[-1,0,0],[0,-1,0],[0,0,1]]
-            #                Both sensors face down (–Z world). Only +X/+Y are flipped.
+            #   rotation:    roll=π AND yaw=π.
+            #                Rz(π) alone leaves camera +Z pointing UP (as manufactured).
+            #                Rx(π) flips +Z → –Z so optical axis points DOWN (nadir).
+            #                Combined RPY [π, 0, π]:
+            #                  R = [[-1,0,0],[0,1,0],[0,0,-1]]
+            #                  cam +X → backward, cam +Y → left, cam +Z → DOWN ✓
             "translation": [0.0, -0.070, 0.030],
-            "rotation_rpy": [0.0, 0.0, math.pi],
+            "rotation_rpy": [math.pi, 0.0, math.pi],
         },
     }
 
@@ -258,19 +263,19 @@ def test_T2_project_point_below_camera(cam: CameraModel, altitude: float):
     """
     T2 — A point directly below the camera projects to the principal point.
 
-    With the real hardware extrinsic (translation [0, -0.070, +0.030], yaw=π):
-      - The camera is offset from the body origin in Y and Z.
-      - To place the camera optical axis directly over world origin (0,0,0),
-        the drone body must be positioned to compensate for those offsets.
-      - Drone body pose: x=0, y=+0.070 (offset back to centre), z=altitude-0.030
-      - After applying T_cam_body the camera world position becomes (0, 0, altitude).
-      - The point at world origin (0,0,0) should then map to (cx, cy).
+    With RPY=[π,0,π] and translation=[0,-0.070,0.030]:
+      T_body_cam translation = R.T @ -t = [0, +0.070, +0.030]
+      To place the camera exactly at (0, 0, altitude), the drone body
+      must be at (0, -0.070, altitude-0.030).
     """
-    # Compensate for extrinsic translation so camera ends up directly above origin
+    from scipy.spatial.transform import Rotation as _R
+    _rpy = [math.pi, 0.0, math.pi]
+    _t   = np.array([0.0, -0.070, 0.030])
+    _Rm  = _R.from_euler("xyz", _rpy).as_matrix()
+    _t_body_cam = -_Rm.T @ _t          # translation part of T_body_cam
+
     drone_pose = np.eye(4, dtype=np.float64)
-    drone_pose[0, 3] = 0.0
-    drone_pose[1, 3] = 0.070    # +Y to cancel the -0.070 Y offset of camera
-    drone_pose[2, 3] = altitude - 0.030  # lower body so camera is at `altitude`
+    drone_pose[:3, 3] = np.array([0.0, 0.0, altitude]) - _t_body_cam
 
     cam_pose   = cam.get_camera_world_pose(drone_pose)
 

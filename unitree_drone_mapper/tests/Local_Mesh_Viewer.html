@@ -1434,7 +1434,7 @@ let currentMesh = null;
 let currentBuffer = null;
 let currentFilename = null;
 let allPlyFiles = [];
-let categorizedFiles = { cloud: [], mesh: [], other: [] };
+let categorizedFiles = { textured: [], mesh: [], cloud: [], other: [], debug: [] };
 let metadata = null;
 let boundingBox = null;
 
@@ -1450,31 +1450,36 @@ raycaster.params.Points.threshold = 0.1;
 const mouse = new THREE.Vector2();
 
 // ══════════════════════════════════════════════════════════════════════════════
-// FILE CATEGORIZATION - Only final mesh and combined cloud
+// FILE CATEGORIZATION
+// Accepts ALL .ply files — uses categories only for display grouping.
+// Nothing is silently discarded so any pipeline output is always visible.
 // ══════════════════════════════════════════════════════════════════════════════
 function categorizeFile(filename) {
   const name = filename.toLowerCase();
-  
-  // Only show final mesh
+
+  // ── Textured mesh (Stage 7 output) ────────────────────────────────────────
+  if (name === 'textured_mesh.ply') return 'textured';
+
+  // ── Final merged mesh ─────────────────────────────────────────────────────
   if (name === 'mesh_final.ply') return 'mesh';
   if (name.endsWith('_mesh.ply') && !name.includes('dtm') && !name.includes('dsm')) return 'mesh';
-  
-  // Only show combined cloud (not MLS, not debug clouds)
+  if (name === 'mesh_merged.ply' || name === 'merged_mesh.ply') return 'mesh';
+
+  // ── Point cloud ───────────────────────────────────────────────────────────
   if (name === 'combined_cloud.ply') return 'cloud';
-  if (name.endsWith('_cloud.ply') && !name.includes('debug')) return 'cloud';
-  
-  // Exclude everything else: MLS, debug, DTM, DSM, ground, raw, capped, classified
-  if (name.includes('_mls')) return null;
-  if (name.includes('debug_')) return null;
-  if (name.includes('_raw')) return null;
-  if (name.includes('_capped')) return null;
-  if (name.includes('_dtm')) return null;
-  if (name.includes('_dsm')) return null;
-  if (name.includes('_ground')) return null;
-  if (name.includes('_nonground')) return null;
-  if (name.includes('_classified')) return null;
-  
-  // Any other PLY goes to 'other' (user can still load it)
+  if (name.endsWith('_cloud.ply')) return 'cloud';
+  if (name.includes('cloud') && name.endsWith('.ply')) return 'cloud';
+
+  // ── Debug / intermediate — shown in a separate group, not hidden ──────────
+  if (name.includes('debug_') || name.includes('_mls') || name.includes('_raw') ||
+      name.includes('_capped') || name.includes('_ground') || name.includes('_nonground') ||
+      name.includes('_classified')) return 'debug';
+
+  // ── DTM / DSM sub-meshes ──────────────────────────────────────────────────
+  if (name.includes('_dtm') || name.includes('_dsm') ||
+      name === 'dtm.ply' || name === 'dsm.ply') return 'other';
+
+  // ── Everything else — always show, never silently drop ───────────────────
   if (name.endsWith('.ply')) return 'other';
   return null;
 }
@@ -1489,7 +1494,7 @@ document.getElementById('btn-open-folder').addEventListener('click', () => {
 document.getElementById('folder-input').addEventListener('change', async (e) => {
   const files = Array.from(e.target.files);
   allPlyFiles = [];
-  categorizedFiles = { cloud: [], mesh: [], other: [] };
+  categorizedFiles = { textured: [], mesh: [], cloud: [], other: [], debug: [] };
   metadata = null;
 
   setStatus('loading', 'LOADING');
@@ -1516,11 +1521,14 @@ document.getElementById('folder-input').addEventListener('change', async (e) => 
   populateFileSelector();
   updateMetadataDisplay();
 
-  // Auto-load best file (priority: mesh_final > mesh > cloud)
+  // Auto-load: textured_mesh > mesh_final > any mesh > cloud > other > any
   let fileToLoad = null;
-  fileToLoad = allPlyFiles.find(f => f.name.toLowerCase() === 'mesh_final.ply');
+  fileToLoad = allPlyFiles.find(f => f.name.toLowerCase() === 'textured_mesh.ply');
+  if (!fileToLoad) fileToLoad = allPlyFiles.find(f => f.name.toLowerCase() === 'mesh_final.ply');
+  if (!fileToLoad && categorizedFiles.textured.length > 0) fileToLoad = categorizedFiles.textured[0];
   if (!fileToLoad && categorizedFiles.mesh.length > 0) fileToLoad = categorizedFiles.mesh[0];
   if (!fileToLoad && categorizedFiles.cloud.length > 0) fileToLoad = categorizedFiles.cloud[0];
+  if (!fileToLoad && categorizedFiles.other.length > 0) fileToLoad = categorizedFiles.other[0];
   if (!fileToLoad && allPlyFiles.length > 0) fileToLoad = allPlyFiles[0];
 
   if (fileToLoad) {
@@ -1537,9 +1545,11 @@ function populateFileSelector() {
   selector.disabled = allPlyFiles.length === 0;
 
   const groups = [
-    { label: '🔷 Final Mesh', files: categorizedFiles.mesh },
-    { label: '☁️ Point Cloud', files: categorizedFiles.cloud },
-    { label: '📄 Other', files: categorizedFiles.other }
+    { label: '🎨 Textured Mesh', files: categorizedFiles.textured },
+    { label: '🔷 Final Mesh',    files: categorizedFiles.mesh },
+    { label: '☁️ Point Cloud',   files: categorizedFiles.cloud },
+    { label: '📄 Other',         files: categorizedFiles.other },
+    { label: '🔧 Debug',         files: categorizedFiles.debug }
   ];
 
   for (const group of groups) {

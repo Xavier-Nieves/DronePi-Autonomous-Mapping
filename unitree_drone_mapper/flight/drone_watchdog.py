@@ -48,7 +48,7 @@ _WATCHDOG_STATUS_FILE_TMP = _WATCHDOG_STATUS_FILE + ".tmp"
 ENABLE_RC_TOGGLE = True
 POLL_HZ          = 10
 MONITOR_HZ       = 10
-MAVROS_WAIT_S    = 15
+MAVROS_WAIT_S    = 60
 
 # Minimum duration any transient led_state override must be held so the
 # 10 Hz LED poll cycle observes it at least once with scheduling margin.

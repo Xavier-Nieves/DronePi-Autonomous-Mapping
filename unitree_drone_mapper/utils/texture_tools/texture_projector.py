@@ -298,7 +298,8 @@ class TextureProjector:
             print(
                 "  [TextureProjector] WARNING: coverage < 20% — "
                 "check extrinsic calibration in config/camera_calibration.yaml. "
-                "Expected pitch=-1.5708 for a downward-facing camera."
+                "Expected rotation_rpy=[pi, 0, pi] for a nadir camera "
+                "(roll=pi flips optical axis down, yaw=pi matches 180 deg mount rotation)."
             )
 
         return self.get_current_mesh()

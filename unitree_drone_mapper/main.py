@@ -1058,6 +1058,7 @@ def _trigger_camera(
     enu: tuple,
     gps_coords: tuple,
     gps_quality: dict,
+    node: "MainNode | None" = None,     # ← added: ROS node for clock access
 ) -> None:
     """Fire one camera trigger at waypoint arrival.
 
@@ -1068,25 +1069,33 @@ def _trigger_camera(
     enu           : (east, north, up) in metres — SLAM-derived position
     gps_coords    : (lat, lon, alt) — best available GPS coordinates
     gps_quality   : dict with keys hdop, satellites, reliable, source
-                    Written into sidecar JSON for post-processing quality gate
+    node          : MainNode instance — used to read ROS clock for ros_timestamp.
+                    If None, ros_timestamp is omitted from the sidecar (non-fatal).
+                    frame_ingestor.py will log a warning but continue with
+                    wall-clock matching as a degraded fallback.
     """
     if cam is None:
         return
+
+    # Obtain ROS clock timestamp for SLAM pose matching in frame_ingestor.py.
+    # ROS clock is preferred over time.time() because PoseInterpolator keys
+    # on ROS timestamps from the SLAM trajectory, not wall clock.
+    ros_ts = None
+    if node is not None:
+        try:
+            ros_ts = node._node.get_clock().now().nanoseconds * 1e-9
+        except Exception:
+            pass   # Non-fatal — sidecar will have ros_timestamp: null
 
     gps_lat, gps_lon, gps_alt = gps_coords
     context = {
         "waypoint_index": waypoint_index,
         "enu":            enu,
         "gps":            (gps_lat, gps_lon, gps_alt),
-        "gps_quality":    gps_quality,   # HDOP, sat count, source — new field
+        "gps_quality":    gps_quality,
+        "ros_timestamp":  ros_ts,           # ← added: written to frame sidecar JSON
     }
     saved = cam.trigger(context)
-    if saved:
-        gps_str = (f"{gps_lat:.5f},{gps_lon:.5f}  HDOP={gps_quality.get('hdop', '?')}"
-                   if gps_lat is not None else "no-fix")
-        log(f"  [CAM] WP {waypoint_index + 1} → {saved.name}  (gps={gps_str})")
-    else:
-        log(f"  [CAM] WP {waypoint_index + 1} trigger timeout — frame skipped")
 
 # ── Mode Handlers ─────────────────────────────────────────────────────────────
 

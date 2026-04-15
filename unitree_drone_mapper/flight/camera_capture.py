@@ -26,13 +26,28 @@ Sensor mode selection:
     preferred for photogrammetry.
 
 Output layout (per session):
-    /mnt/ssd/flights/<session>/
+    /mnt/ssd/maps/<session>/flight_frames/
         frame_0001.jpg          JPEG, quality 95
-        frame_0001.json         Sidecar: timestamp, ENU pose, GPS, waypoint index
+        frame_0001.json         Sidecar: ros_timestamp, timestamp_iso,
+                                ENU pose, GPS, waypoint index
         frame_0002.jpg
         frame_0002.json
         ...
         capture_log.csv         One row per frame for QA
+
+    Frames are written to flight_frames/ inside the same session directory
+    used by the mesh pipeline (/mnt/ssd/maps/<session>/), so all pipeline
+    outputs for one flight live under a single session root.
+
+    CHANGE LOG vs previous version:
+        1. FLIGHT_BASE_DIR changed from /mnt/ssd/flights → /mnt/ssd/maps
+           to unify session directories with postprocess_mesh.py output.
+        2. output_dir now resolves to FLIGHT_BASE_DIR/session_id/flight_frames/
+           to isolate frames from mesh outputs in the shared session root.
+        3. ros_timestamp added to sidecar JSON. main.py injects the ROS node
+           clock time via the trigger context dict so frame_ingestor.py can
+           match frames to SLAM poses using PoseInterpolator without relying
+           on wall-clock timestamps.
 
 Thread safety:
     _trigger    threading.Event — main thread sets, capture thread clears
@@ -50,7 +65,12 @@ Usage (from handle_autonomous in main.py):
     camera.start()
 
     # At each waypoint arrival:
-    meta = {"waypoint": i, "enu": (ex, ey, ez), "gps": (lat, lon, alt)}
+    meta = {
+        "waypoint_index": i,
+        "enu":            (ex, ey, ez),
+        "gps":            (lat, lon, alt),
+        "ros_timestamp":  node.get_clock().now().nanoseconds * 1e-9,
+    }
     path = camera.trigger(meta)
     log(f"  [CAM] Saved {path}")
 
@@ -72,7 +92,10 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-FLIGHT_BASE_DIR  = Path("/mnt/ssd/flights")
+# CHANGE 1: Unified with postprocess_mesh.py session root.
+# All pipeline outputs for one flight now live under /mnt/ssd/maps/<session>/.
+FLIGHT_BASE_DIR  = Path("/mnt/ssd/maps")
+
 SENSOR_MODE      = {"size": (2028, 1520)}   # Full-frame, max GSD
 FRAMERATE        = 40                        # IMX477 maximum at full resolution
 JPEG_QUALITY     = 95                        # Lossless enough for photogrammetry
@@ -80,9 +103,11 @@ TRIGGER_TIMEOUT  = 2.0                       # Seconds to wait for trigger ack
 CAPTURE_LOG_NAME = "capture_log.csv"
 CSV_HEADERS      = [
     "frame_index", "filename", "timestamp_iso",
+    "ros_timestamp",
     "waypoint_index",
     "enu_x", "enu_y", "enu_z",
     "gps_lat", "gps_lon", "gps_alt",
+    "exif_written",
     "latency_ms",
 ]
 
@@ -95,9 +120,9 @@ class CameraCapture:
     ----------
     session_id : str
         Unique identifier for this flight session (e.g. 'scan_20260402_120000').
-        Determines the output directory under FLIGHT_BASE_DIR.
+        Determines the output directory: FLIGHT_BASE_DIR / session_id / flight_frames/
     output_dir : Path or None
-        Override output directory. Defaults to FLIGHT_BASE_DIR / session_id.
+        Override output directory entirely. Defaults to the resolved path above.
     jpeg_quality : int
         JPEG compression quality (1–100). Default 95.
     """
@@ -109,7 +134,12 @@ class CameraCapture:
         jpeg_quality: int = JPEG_QUALITY,
     ):
         self.session_id   = session_id
-        self.output_dir   = Path(output_dir) if output_dir else FLIGHT_BASE_DIR / session_id
+        # CHANGE 2: Frames live in flight_frames/ subfolder inside the session dir.
+        # This isolates JPEGs and sidecars from PLY mesh outputs in the same root.
+        self.output_dir   = (
+            Path(output_dir) if output_dir
+            else FLIGHT_BASE_DIR / session_id / "flight_frames"
+        )
         self.jpeg_quality = jpeg_quality
 
         self._camera      = None          # Picamera2 instance
@@ -206,9 +236,9 @@ class CameraCapture:
         """
         Signal the capture thread to save the current frame.
 
-        Posts `context` as the sidecar metadata (waypoint index, ENU pose,
-        GPS coordinates). The capture thread saves the frame and returns the
-        path via `_last_saved_path` within `timeout` seconds.
+        Posts `context` as the sidecar metadata. The `ros_timestamp` key,
+        if present, is written to the sidecar JSON so frame_ingestor.py
+        can match frames to SLAM poses via PoseInterpolator.
 
         Parameters
         ----------
@@ -217,6 +247,8 @@ class CameraCapture:
                 waypoint_index : int
                 enu            : (x, y, z) tuple in metres
                 gps            : (lat, lon, alt) tuple
+                ros_timestamp  : float — ROS clock time in seconds
+                                 (node.get_clock().now().nanoseconds * 1e-9)
         timeout : float
             Maximum seconds to wait for the capture thread to acknowledge.
 
@@ -252,7 +284,6 @@ class CameraCapture:
         synchronously and the trigger is cleared.
         """
         while not self._stop.is_set():
-            # Block on trigger event — no busy-wait CPU usage
             self._trigger.wait()
             if self._stop.is_set():
                 break
@@ -260,9 +291,8 @@ class CameraCapture:
 
             t_trigger = time.monotonic()
 
-            # Capture a frame directly (blocking, ~1 frame period = 25ms)
             try:
-                frame = self._camera.capture_array("main")
+                frame    = self._camera.capture_array("main")
                 cam_meta = self._camera.capture_metadata()
             except Exception as exc:
                 logger.error(f"[CameraCapture] Capture failed: {exc}")
@@ -292,53 +322,73 @@ class CameraCapture:
         """Save frame as JPEG and write sidecar JSON + CSV row."""
         from PIL import Image
 
-        idx      = self._frame_index
-        filename = f"frame_{idx:04d}.jpg"
-        jpg_path = self.output_dir / filename
+        idx       = self._frame_index
+        filename  = f"frame_{idx:04d}.jpg"
+        jpg_path  = self.output_dir / filename
         json_path = self.output_dir / f"frame_{idx:04d}.json"
 
-        # Save JPEG
+        enu    = context.get("enu",  (None, None, None))
+        gps    = context.get("gps",  (None, None, None))
+        ros_ts = context.get("ros_timestamp", None)
+
+        # ── JPEG with GPS EXIF ────────────────────────────────────────────────
+        # _build_gps_exif returns b"" gracefully if piexif is absent or GPS is
+        # None — the plain JPEG is written instead and flagged in the sidecar.
+        exif_bytes   = _build_gps_exif(gps[0], gps[1], gps[2])
+        exif_written = len(exif_bytes) > 0
+
         img = Image.fromarray(frame, mode="RGB")
-        img.save(str(jpg_path), format="JPEG", quality=self.jpeg_quality)
+        if exif_written:
+            img.save(str(jpg_path), format="JPEG",
+                     quality=self.jpeg_quality, exif=exif_bytes)
+        else:
+            img.save(str(jpg_path), format="JPEG", quality=self.jpeg_quality)
 
         latency_ms = (time.monotonic() - t_trigger) * 1000.0
         from datetime import timezone as _tz
-        ts_iso     = datetime.now(tz=_tz.utc).isoformat()
+        ts_iso = datetime.now(tz=_tz.utc).isoformat()
 
-        # Sidecar JSON
-        enu = context.get("enu", (None, None, None))
-        gps = context.get("gps", (None, None, None))
+        # ── Sidecar JSON ──────────────────────────────────────────────────────
         sidecar = {
-            "frame_index":    idx,
-            "filename":       filename,
-            "timestamp_iso":  ts_iso,
-            "waypoint_index": context.get("waypoint_index"),
-            "enu":            {"x": enu[0], "y": enu[1], "z": enu[2]},
-            "gps":            {"lat": gps[0], "lon": gps[1], "alt": gps[2]},
-            "latency_ms":     round(latency_ms, 2),
-            "sensor_mode":    f"{SENSOR_MODE['size'][0]}x{SENSOR_MODE['size'][1]}",
-            "framerate":      FRAMERATE,
-            "jpeg_quality":   self.jpeg_quality,
-            "cam_exposure_us": cam_meta.get("ExposureTime"),
-            "cam_gain":        cam_meta.get("AnalogueGain"),
-            "cam_awb_r":       cam_meta.get("ColourGains", [None, None])[0],
-            "cam_awb_b":       cam_meta.get("ColourGains", [None, None])[1],
+            "frame_index":      idx,
+            "filename":         filename,
+            "timestamp_iso":    ts_iso,         # wall clock — human readable
+            "ros_timestamp":    ros_ts,          # ROS clock — SLAM pose matching
+            "waypoint_index":   context.get("waypoint_index"),
+            "enu":              {"x": enu[0], "y": enu[1], "z": enu[2]},
+            "gps":              {"lat": gps[0], "lon": gps[1], "alt": gps[2]},
+            "gps_quality":      context.get("gps_quality", {}),
+            "exif_gps_written": exif_written,   # QA flag for frame_ingestor
+            "latency_ms":       round(latency_ms, 2),
+            "sensor_mode":      f"{SENSOR_MODE['size'][0]}x{SENSOR_MODE['size'][1]}",
+            "framerate":        FRAMERATE,
+            "jpeg_quality":     self.jpeg_quality,
+            "cam_exposure_us":  cam_meta.get("ExposureTime"),
+            "cam_gain":         cam_meta.get("AnalogueGain"),
+            "cam_awb_r":        cam_meta.get("ColourGains", [None, None])[0],
+            "cam_awb_b":        cam_meta.get("ColourGains", [None, None])[1],
         }
         json_path.write_text(json.dumps(sidecar, indent=2))
 
-        # CSV row
         self._csv_writer.writerow([
             idx, filename, ts_iso,
+            ros_ts,
             context.get("waypoint_index", ""),
             enu[0], enu[1], enu[2],
             gps[0], gps[1], gps[2],
+            exif_written,
             round(latency_ms, 2),
         ])
         self._csv_file.flush()
 
+        gps_str = (
+            f"({gps[0]:.5f}, {gps[1]:.5f})" if gps[0] is not None else "no-fix"
+        )
         logger.info(
-            f"[CameraCapture] Frame {idx:04d} saved  "
-            f"latency={latency_ms:.1f}ms  {jpg_path.name}"
+            f"[CameraCapture] Frame {idx:04d}  "
+            f"latency={latency_ms:.1f}ms  "
+            f"exif={'ok' if exif_written else 'no-fix'}  "
+            f"gps={gps_str}"
         )
         return jpg_path
 
@@ -361,3 +411,58 @@ class CameraCapture:
 
     def __exit__(self, *_):
         self.stop()
+
+
+# ── EXIF GPS helper (appended at module level) ────────────────────────────────
+
+def _build_gps_exif(lat, lon, alt):
+    """
+    Build a minimal EXIF block containing a GPS IFD for embedding in JPEG.
+
+    Writes six standard GPS tags recognised by ODM, QGIS, and consumer tools:
+        GPSLatitudeRef / GPSLatitude
+        GPSLongitudeRef / GPSLongitude
+        GPSAltitudeRef  / GPSAltitude
+
+    DMS rational encoding: degrees and minutes use denominator 1.
+    Seconds use denominator 1000 for ~30 mm ground precision — well inside
+    GPS CEP of 3-5 m for consumer receivers.
+
+    Returns b"" if lat/lon is None or piexif is unavailable (non-fatal).
+    """
+    if lat is None or lon is None:
+        return b""
+    try:
+        import piexif
+    except ImportError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "[CameraCapture] piexif not installed - EXIF GPS skipped. "
+            "Install: pip install piexif --break-system-packages"
+        )
+        return b""
+
+    def to_dms(degrees):
+        abs_d = abs(degrees)
+        d = int(abs_d)
+        m = int((abs_d - d) * 60)
+        s = round(((abs_d - d) * 60 - m) * 60 * 1000)
+        return ((d, 1), (m, 1), (s, 1000))
+
+    alt_val = alt if alt is not None else 0.0
+    gps_ifd = {
+        piexif.GPSIFD.GPSLatitudeRef:   b"N" if lat >= 0 else b"S",
+        piexif.GPSIFD.GPSLatitude:      to_dms(lat),
+        piexif.GPSIFD.GPSLongitudeRef:  b"E" if lon >= 0 else b"W",
+        piexif.GPSIFD.GPSLongitude:     to_dms(lon),
+        piexif.GPSIFD.GPSAltitudeRef:   0,
+        piexif.GPSIFD.GPSAltitude:      (int(abs(alt_val) * 100), 100),
+    }
+    try:
+        return piexif.dump({"GPS": gps_ifd})
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[CameraCapture] piexif.dump failed: {exc} - EXIF GPS skipped"
+        )
+        return b""

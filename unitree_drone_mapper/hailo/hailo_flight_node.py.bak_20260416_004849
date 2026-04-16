@@ -95,152 +95,6 @@ def _import_ros():
            TwistStamped, PoseStamped, String
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# RpicamCapture — direct rpicam-vid MJPEG stdout capture
-# ══════════════════════════════════════════════════════════════════════════════
-
-class RpicamCapture:
-    """
-    In-process camera capture using rpicam-vid MJPEG stdout pipe.
-
-    IMX477 with rpicam-apps/libcamera does not expose a /dev/video* V4L2
-    node — cv2.VideoCapture(CAP_V4L2) will always fail on this hardware.
-    rpicam-vid is called directly and its MJPEG stdout is read frame-by-frame
-    using FF D8 (SOI) / FF D9 (EOI) JPEG marker scanning.
-    Source: JPEG specification ISO/IEC 10918-1.
-
-    This is the same reader used in the flight test scripts.
-    """
-
-    _SOI   = b"\xff\xd8"
-    _EOI   = b"\xff\xd9"
-    _CHUNK = 65536
-
-    def __init__(self, width: int = 640, height: int = 480, fps: int = 30) -> None:
-        import threading
-        self._width  = width
-        self._height = height
-        self._fps    = fps
-        self._proc   = None
-        self._thread = None
-        self._lock   = threading.Lock()
-        self._frame  = None   # latest complete JPEG bytes
-        self._count  = 0
-        self._stop   = threading.Event()
-
-    def start(self) -> bool:
-        import subprocess, os, threading
-        cmd = [
-            "rpicam-vid",
-            "--codec",     "mjpeg",
-            "-o",          "-",
-            "--width",     str(self._width),
-            "--height",    str(self._height),
-            "--framerate", str(self._fps),
-            "--timeout",   "0",
-            "--nopreview",
-            "--flush",
-        ]
-        try:
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,
-                preexec_fn=os.setsid,
-            )
-        except FileNotFoundError:
-            print("[RpicamCapture] rpicam-vid not found")
-            return False
-        except Exception as exc:
-            print(f"[RpicamCapture] Launch failed: {exc}")
-            return False
-
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._reader_loop, daemon=True, name="rpicam_hailo"
-        )
-        self._thread.start()
-
-        import time
-        deadline = time.time() + 6.0
-        while time.time() < deadline:
-            with self._lock:
-                if self._count > 0:
-                    print(f"[RpicamCapture] Ready  {self._width}×{self._height} @ {self._fps}fps")
-                    return True
-            time.sleep(0.1)
-        print("[RpicamCapture] Started — no frames yet")
-        return True
-
-    def read(self):
-        """cv2.VideoCapture-compatible read() — returns (True, bgr_array)."""
-        import cv2
-        import numpy as np
-        import time
-        deadline = time.time() + 0.5
-        with self._lock:
-            prev = self._count
-        while time.time() < deadline:
-            with self._lock:
-                if self._count > prev and self._frame is not None:
-                    jpeg = bytes(self._frame)
-                    break
-            time.sleep(0.01)
-        else:
-            return False, None
-        arr = np.frombuffer(jpeg, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        return (img is not None), img
-
-    def release(self) -> None:
-        import os, signal
-        self._stop.set()
-        if self._proc is not None and self._proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(self._proc.pid), signal.SIGINT)
-                self._proc.wait(timeout=5)
-            except Exception:
-                try:
-                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        print(f"[RpicamCapture] Released  ({self._count} frames captured)")
-
-    def isOpened(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None
-
-    def _reader_loop(self) -> None:
-        buf = b""
-        start_idx = -1
-        while not self._stop.is_set():
-            try:
-                chunk = self._proc.stdout.read(self._CHUNK)
-            except Exception:
-                break
-            if not chunk:
-                break
-            buf += chunk
-            while True:
-                if start_idx < 0:
-                    idx = buf.find(self._SOI)
-                    if idx < 0:
-                        buf = buf[-1:]
-                        break
-                    start_idx = idx
-                eoi_idx = buf.find(self._EOI, start_idx + 2)
-                if eoi_idx < 0:
-                    break
-                frame_bytes = buf[start_idx : eoi_idx + 2]
-                with self._lock:
-                    self._frame = frame_bytes
-                    self._count += 1
-                buf = buf[eoi_idx + 2:]
-                start_idx = -1
-
-
 class HailoFlightNode:
     """ROS 2 node that runs both Hailo inference models and publishes results.
 
@@ -492,20 +346,23 @@ class HailoFlightNode:
             return None
 
     def _open_camera(self):
-        """Open IMX477 via direct rpicam-vid stdout pipe (RpicamCapture).
-
-        IMX477 with rpicam-apps/libcamera does not create a /dev/video* node.
-        cv2.VideoCapture(CAP_V4L2) always fails on this hardware.
-        RpicamCapture reads the rpicam-vid MJPEG stdout directly and exposes
-        a read()/release()/isOpened() interface compatible with the rest of
-        the spin() loop — no other changes required.
-        """
-        cap = RpicamCapture(width=CAPTURE_W, height=CAPTURE_H, fps=30)
-        if cap.start():
-            print(f"[HailoFlightNode] Camera opened via rpicam-vid "
-                  f"({CAPTURE_W}×{CAPTURE_H})")
-            return cap
-        print("[HailoFlightNode] rpicam-vid camera unavailable")
+        """Open IMX477 via OpenCV V4L2 backend."""
+        import cv2
+        # Try device indices 0–3 — IMX477 is typically /dev/video0 on RPi
+        for idx in range(4):
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_W)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
+                cap.set(cv2.CAP_PROP_FPS,          30)
+                # Read one frame to confirm the device is live
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    print(f"[HailoFlightNode] Camera opened: /dev/video{idx} "
+                          f"({CAPTURE_W}×{CAPTURE_H})")
+                    return cap
+                cap.release()
+        print("[HailoFlightNode] No camera found on /dev/video0–3")
         return None
 
 

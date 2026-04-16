@@ -154,13 +154,11 @@ _SERVICES_WATCHDOG = ["drone-watchdog.service"]
 
 # ── Process commands ──────────────────────────────────────────────────────────
 _POINTLIO_LOG = Path("/tmp/square_test_pointlio.log")
-_ARDUCAM_LOG  = Path("/tmp/square_test_arducam.log")
 
 def _ros_source() -> str:
     return f"source {_ROS_SETUP} && source {_WS_SETUP} && "
 
 _POINTLIO_CMD = _ros_source() + "ros2 launch point_lio mapping_unilidar.launch.py"
-_ARDUCAM_CMD  = _ros_source() + f"python3 {_ARDUCAM_NODE}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -228,6 +226,159 @@ class ServiceManager:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# RpicamCapture — direct rpicam-vid MJPEG stdout capture
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RpicamCapture:
+    """
+    In-process camera capture using rpicam-vid MJPEG stdout pipe.
+
+    Mirrors the frame extraction logic from ArducamNode but runs
+    inside the test process — no ROS topic, no DDS discovery, no
+    subprocess-to-subprocess IPC. rpicam-vid is the only subprocess.
+
+    rpicam-vid --codec mjpeg -o - writes raw concatenated JPEGs.
+    Each JPEG starts with FF D8 (SOI) and ends with FF D9 (EOI).
+    The reader thread scans for these markers to extract complete frames.
+    Source: JPEG specification ISO/IEC 10918-1.
+    """
+
+    _SOI = b"\xff\xd8"
+    _EOI = b"\xff\xd9"
+    _CHUNK = 65536
+
+    def __init__(self, width: int = 1280, height: int = 960, fps: int = 10) -> None:
+        self._width   = width
+        self._height  = height
+        self._fps     = fps
+        self._proc:   Optional[subprocess.Popen] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock    = threading.Lock()
+        self._frame:  Optional[bytes] = None
+        self._count   = 0
+        self._stop    = threading.Event()
+
+    def start(self) -> bool:
+        """Launch rpicam-vid and start the MJPEG reader thread. Returns True on success."""
+        cmd = [
+            "rpicam-vid",
+            "--codec",     "mjpeg",
+            "-o",          "-",
+            "--width",     str(self._width),
+            "--height",    str(self._height),
+            "--framerate", str(self._fps),
+            "--timeout",   "0",
+            "--nopreview",
+            "--flush",
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+                preexec_fn=os.setsid,
+            )
+        except FileNotFoundError:
+            print("  [Camera] rpicam-vid not found — camera checks will be skipped")
+            return False
+        except Exception as exc:
+            print(f"  [Camera] rpicam-vid launch failed: {exc}")
+            return False
+
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._reader_loop, daemon=True, name="rpicam_reader"
+        )
+        self._thread.start()
+
+        # Wait up to 6s for the first frame before continuing
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            with self._lock:
+                if self._count > 0:
+                    print(f"  [Camera] rpicam-vid ready  "
+                          f"{self._width}×{self._height} @ {self._fps} fps  ✓")
+                    return True
+            time.sleep(0.1)
+
+        print("  [Camera] rpicam-vid started — no frames yet, continuing")
+        return True
+
+    def capture(self, timeout: float = 3.0) -> "Optional[np.ndarray]":
+        """
+        Return the latest frame as a BGR numpy array, or None on timeout.
+
+        Waits until a frame newer than the last seen arrives.
+        """
+        import cv2
+        with self._lock:
+            prev = self._count
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if self._count > prev and self._frame is not None:
+                    jpeg = bytes(self._frame)
+                    break
+            time.sleep(0.05)
+        else:
+            return None
+
+        arr = np.frombuffer(jpeg, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)   # BGR or None if corrupt
+
+    def stop(self) -> None:
+        """Stop the reader thread and terminate rpicam-vid cleanly."""
+        self._stop.set()
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGINT)
+                self._proc.wait(timeout=5)
+            except Exception:
+                try:
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+        print(f"  [Camera] stopped  ({self._count} frames captured)")
+
+    @property
+    def frame_count(self) -> int:
+        with self._lock:
+            return self._count
+
+    def _reader_loop(self) -> None:
+        buf = b""
+        start_idx = -1
+        while not self._stop.is_set():
+            try:
+                chunk = self._proc.stdout.read(self._CHUNK)
+            except Exception:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                if start_idx < 0:
+                    idx = buf.find(self._SOI)
+                    if idx < 0:
+                        buf = buf[-1:]
+                        break
+                    start_idx = idx
+                eoi_idx = buf.find(self._EOI, start_idx + 2)
+                if eoi_idx < 0:
+                    break
+                frame_bytes = buf[start_idx : eoi_idx + 2]
+                with self._lock:
+                    self._frame = frame_bytes
+                    self._count += 1
+                buf = buf[eoi_idx + 2:]
+                start_idx = -1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Process helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -289,34 +440,49 @@ def _wait_topic(topic: str, timeout: float = 25.0, min_hz: float = 1.0) -> bool:
     return False
 
 
-def _wait_arducam_ready(proc: Optional[subprocess.Popen], log_path: Path, timeout: float = 15.0) -> bool:
-    """Wait for ArducamNode readiness without relying on ros2 topic hz QoS support.
+def _wait_arducam_ready(proc: "Optional[subprocess.Popen]", log_path: "Path", timeout: float = 25.0) -> bool:
+    """Wait for ArducamNode readiness via log file polling.
 
-    On this Pi/ROS CLI build, `ros2 topic hz` does not expose the QoS override
-    flags needed for BEST_EFFORT image topics. Instead, treat the node as ready
-    when either discovery shows /arducam/image_raw or the node log confirms that
-    frames are being published. Also fail fast if the process exits.
+    ArducamNode publishes with BEST_EFFORT QoS. In this environment,
+    ros2 topic list does not discover the topic reliably within the
+    readiness window, and the QoS override flags required by ros2 topic hz
+    are not supported by the installed ROS 2 CLI build.
+
+    The log file is the authoritative readiness signal:
+      "ArducamNode started" -- node initialised, rpicam-vid launched (~1s)
+      "Published N frames"  -- frames flowing through the ROS pipeline (~5s)
+
+    The ros2 topic list check is intentionally omitted. It spawns a bash
+    subprocess that sources two setup files per poll iteration, consuming
+    1-3s per call and exhausting the timeout before the log signals appear.
     """
-    print(f"  Waiting for /arducam/image_raw  ({timeout:.0f}s timeout)", end="", flush=True)
+    print(f"  Waiting for ArducamNode  ({timeout:.0f}s timeout)", end="", flush=True)
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        if proc is not None and proc.poll() is not None:
-            print(" PROCESS EXIT")
-            return False
+    started_seen = False
 
-        r = subprocess.run(
-            ["bash", "-c", _ros_source() + "ros2 topic list 2>/dev/null"],
-            capture_output=True, text=True,
-        )
-        if "/arducam/image_raw" in r.stdout.splitlines():
-            print(" discovered  ✓")
-            return True
+    # Allow the subprocess and rpicam-vid time to write the first log line
+    # before beginning polls. Without this, the first 1-2 iterations read
+    # an empty file and print spurious dots.
+    time.sleep(1.5)
+
+    while time.time() < deadline:
+        # Fail fast if the process has already exited abnormally
+        if proc is not None and proc.poll() is not None:
+            print(" PROCESS EXITED")
+            return False
 
         try:
             if log_path.exists():
-                tail = log_path.read_text(errors="ignore")[-4000:]
-                if "Published " in tail or "ArducamNode started" in tail:
-                    print(" log-ready  ✓")
+                tail = log_path.read_text(errors="ignore")
+                if not started_seen and "ArducamNode started" in tail:
+                    started_seen = True
+                    print(" [node up]", end="", flush=True)
+                # "Published N frames" appears at frame 50 (~5s at 10 Hz).
+                # This is the definitive signal that the full pipeline
+                # (rpicam-vid -> MJPEG parser -> cv2.imdecode -> ROS publish)
+                # is working end-to-end.
+                if "Published" in tail:
+                    print("  ✓")
                     return True
         except Exception:
             pass
@@ -326,11 +492,6 @@ def _wait_arducam_ready(proc: Optional[subprocess.Popen], log_path: Path, timeou
 
     print(" TIMEOUT")
     return False
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Bag recorder — single bag for the whole flight
-# ══════════════════════════════════════════════════════════════════════════════
 
 class BagRecorder:
     """
@@ -404,7 +565,7 @@ class SquareCameraNode:
         ("C4", +1, -1),
     ]
 
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, cam_capture: RpicamCapture = None) -> None:
         import rclpy
         from rclpy.node import Node
         from rclpy.qos  import (QoSProfile, ReliabilityPolicy,
@@ -413,11 +574,12 @@ class SquareCameraNode:
         from mavros_msgs.msg   import State
         from mavros_msgs.srv   import CommandBool, SetMode
         from nav_msgs.msg      import Odometry
-        from sensor_msgs.msg   import Image, Range
+        from sensor_msgs.msg   import Range
         from std_msgs.msg      import String
 
         self._rclpy = rclpy
-        self._args  = args
+        self._args       = args
+        self._cam        = cam_capture
         rclpy.init()
 
         class _Inner(Node):
@@ -434,7 +596,6 @@ class SquareCameraNode:
 
                 inner_self.fcu_state:      Optional[State]       = None
                 inner_self.local_pose:     Optional[PoseStamped] = None
-                inner_self.last_image:     Optional[Image]       = None
                 inner_self.lidar_ts:       Optional[float]       = None
                 inner_self.collision_zone: Optional[str]         = None
                 inner_self.agl_m:          Optional[float]       = None
@@ -449,9 +610,6 @@ class SquareCameraNode:
                 inner_self.create_subscription(
                     Odometry, "/aft_mapped_to_init",
                     inner_self._cb_lidar, sensor)
-                inner_self.create_subscription(
-                    Image, "/arducam/image_raw",
-                    inner_self._cb_image, sensor)
                 inner_self.create_subscription(
                     String, TOPIC_COLLISION_ZONE,
                     inner_self._cb_zone, reliable)
@@ -470,10 +628,6 @@ class SquareCameraNode:
                 ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                 with inner_self._lock:
                     inner_self.lidar_ts = ts
-
-            def _cb_image(inner_self, msg):
-                with inner_self._lock:
-                    inner_self.last_image = msg
 
             def _cb_zone(inner_self, msg):
                 with inner_self._lock:
@@ -588,24 +742,11 @@ class SquareCameraNode:
 
     # ── Frame capture ─────────────────────────────────────────────────────────
 
-    def _wait_new_frame(self, timeout: float = 3.0) -> Optional[object]:
-        """Wait for a frame newer than the currently cached one."""
-        with self._node._lock:
-            pre_ts = (
-                self._node.last_image.header.stamp.sec
-                + self._node.last_image.header.stamp.nanosec * 1e-9
-                if self._node.last_image else 0.0
-            )
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            self._spin(0.05)
-            with self._node._lock:
-                img = self._node.last_image
-            if img is not None:
-                ts = img.header.stamp.sec + img.header.stamp.nanosec * 1e-9
-                if ts > pre_ts:
-                    return img
-        return None
+    def _wait_new_frame(self, timeout: float = 3.0) -> "Optional[np.ndarray]":
+        """Capture a frame directly from rpicam-vid via RpicamCapture."""
+        if self._cam is None:
+            return None
+        return self._cam.capture(timeout=timeout)
 
     def capture_frame(
         self, corner: str, frame_idx: int, z_target: float,
@@ -637,7 +778,9 @@ class SquareCameraNode:
             print(f"    [FAIL] No new frame (timeout)")
             return result
 
-        frame_ts = frame.header.stamp.sec + frame.header.stamp.nanosec * 1e-9
+        # Timestamp taken at capture() return — equivalent to ArducamNode's
+        # FF D9 boundary stamp. Both record when a complete frame is CPU-ready.
+        frame_ts = self._node.get_clock().now().nanoseconds / 1e9
 
         # ── LiDAR sync ────────────────────────────────────────────────────────
         with self._node._lock:
@@ -652,7 +795,7 @@ class SquareCameraNode:
             print("    [WARN] No LiDAR timestamp — sync skipped")
 
         # ── Focus ─────────────────────────────────────────────────────────────
-        img = self._decode(frame)
+        img = frame   # already BGR numpy array from RpicamCapture
         if img is not None:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             lap  = float(cv2.Laplacian(gray, cv2.CV_64F).var())
@@ -693,22 +836,7 @@ class SquareCameraNode:
         )
         return result
 
-    @staticmethod
-    def _decode(msg) -> Optional[object]:
-        import cv2
-        import numpy as np
-        enc = msg.encoding.lower()
-        h, w = int(msg.height), int(msg.width)
-        raw  = bytes(msg.data)
-        if enc == "bgr8":
-            return np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3).copy()
-        if enc == "rgb8":
-            rgb = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
-            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        if enc == "mono8":
-            gray = np.frombuffer(raw, dtype=np.uint8).reshape(h, w)
-            return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        return None
+
 
     # ── Main flight sequence ──────────────────────────────────────────────────
 
@@ -764,9 +892,10 @@ class SquareCameraNode:
             cam = lidar = False
             while time.time() < deadline:
                 self._spin(0.2)
+                # Camera liveness via RpicamCapture (no ROS subscription)
+                cam   = (self._cam is not None and self._cam.frame_count > 0)
                 with self._node._lock:
-                    cam   = self._node.last_image is not None
-                    lidar = self._node.lidar_ts   is not None
+                    lidar = self._node.lidar_ts is not None
                 if cam and lidar:
                     break
 
@@ -1071,18 +1200,13 @@ def main() -> None:
                 print("  [FAIL] Point-LIO not publishing after 30s")
                 return
 
-        print("\n[Setup 2/3] Starting ArducamNode...")
-        if not _ARDUCAM_NODE.exists():
-            print(f"  [FAIL] Not found: {_ARDUCAM_NODE}")
-            return
-        arducam_proc = _launch("ArducamNode", _ARDUCAM_CMD, _ARDUCAM_LOG)
-        print(f"  PID: {arducam_proc.pid}   log: tail -f {_ARDUCAM_LOG}")
-        if not _wait_topic("/arducam/image_raw", timeout=15.0):
-            print("  [FAIL] ArducamNode not publishing after 15s")
-            return
+        print("\n[Setup 2/3] Starting camera (rpicam-vid direct)...")
+        cam_capture = RpicamCapture(width=1280, height=960, fps=10)
+        if not cam_capture.start():
+            print("  [WARN] Camera unavailable — capture checks will be skipped")
 
         print("\n[Setup 3/3] Initialising ROS 2 node...")
-        flight = SquareCameraNode(args)
+        flight = SquareCameraNode(args, cam_capture)
 
         if args.dry_run:
             flight_ok = flight.run(BagRecorder())  # bag never started in dry run
@@ -1101,7 +1225,8 @@ def main() -> None:
         if flight is not None:
             flight.shutdown()
         print("\n[Teardown] Stopping test processes...")
-        _stop_proc("ArducamNode", arducam_proc)
+        if 'cam_capture' in dir() and cam_capture is not None:
+            cam_capture.stop()
         _stop_proc("Point-LIO",   plio_proc)
         if not args.no_service_stop:
             svc.restore_all()

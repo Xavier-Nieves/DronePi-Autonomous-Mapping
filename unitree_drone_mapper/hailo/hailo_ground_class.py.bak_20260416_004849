@@ -148,16 +148,15 @@ class HailoGroundClassifier:
         try:
             from hailo_platform import InferVStreams
 
-            # hailort 4.23.0: InferVStreams must be the outer context.
-            # activate() entered after InferVStreams.__enter__() so buffer
-            # size negotiation runs against an inactive network group.
+            # activate() required in hailort >= 4.23.0 before InferVStreams.
+            # input_name extracted from dict keys (not .name on a list element).
             input_name = list(self._input_params.keys())[0]
-            with InferVStreams(
-                self._network_group,
-                self._input_params,
-                self._output_params,
-            ) as pipeline:
-                with self._network_group.activate():
+            with self._network_group.activate():
+                with InferVStreams(
+                    self._network_group,
+                    self._input_params,
+                    self._output_params,
+                ) as pipeline:
                     raw = pipeline.infer({input_name: tensor})
 
             latency_ms = (time.monotonic() - t0) * 1000.0

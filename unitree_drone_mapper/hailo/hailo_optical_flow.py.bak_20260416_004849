@@ -232,17 +232,14 @@ class HailoOpticalFlow:
 
             input_name = list(self._input_params.keys())[0]
 
-            # hailort 4.23.0: InferVStreams must be the outer context.
-            # activate() must be entered AFTER InferVStreams.__enter__() so
-            # that vstream buffer sizes are negotiated on an inactive network
-            # group. Inverting the order produces got=0 buffer size errors.
-            # Source: Hailo Application Code Examples, hailort >= 4.19.
-            with InferVStreams(
-                self._network_group,
-                self._input_params,
-                self._output_params,
-            ) as pipeline:
-                with self._network_group.activate():
+            # activate() is required in hailort >= 4.23.0 before InferVStreams.
+            # Omitting it produces HAILO_NETWORK_GROUP_NOT_ACTIVATED(69).
+            with self._network_group.activate():
+                with InferVStreams(
+                    self._network_group,
+                    self._input_params,
+                    self._output_params,
+                ) as pipeline:
                     raw_outputs = pipeline.infer({input_name: frame_t1})
 
             latency_ms = (time.monotonic() - t_start) * 1000.0
@@ -363,12 +360,12 @@ class HailoOpticalFlow:
         try:
             from hailo_platform import InferVStreams
             input_name = list(self._input_params.keys())[0]
-            with InferVStreams(
-                self._network_group,
-                self._input_params,
-                self._output_params,
-            ) as pipeline:
-                with self._network_group.activate():
+            with self._network_group.activate():
+                with InferVStreams(
+                    self._network_group,
+                    self._input_params,
+                    self._output_params,
+                ) as pipeline:
                     raw_outputs = pipeline.infer({input_name: frame})
 
             output_key  = list(raw_outputs.keys())[0]

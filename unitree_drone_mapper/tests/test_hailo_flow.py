@@ -376,7 +376,9 @@ def test_T5_T6_flow_bridge(verbose: bool) -> None:
         f"pass_rate={stats['pass_rate']:.2f}",
     )
 
-    bridge.destroy()
+    # Guard against older FlowBridge versions that predate destroy()
+    if hasattr(bridge, 'destroy'):
+        bridge.destroy()
     node.destroy_node()
     rclpy.shutdown()
 
@@ -488,7 +490,7 @@ Add after FlightStack is started, before the waypoint loop:
 
 Add to teardown (after mission loop exits):
 
-    if flow_bridge is not None:
+    if flow_bridge is not None and hasattr(flow_bridge, 'destroy'):
         flow_bridge.destroy()
 """)
 

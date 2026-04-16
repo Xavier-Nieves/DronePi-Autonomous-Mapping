@@ -41,6 +41,17 @@ BRIDGE_MIN_HZ = 8.0
 SLAM_TOPIC_TIMEOUT_S = 30.0
 BRIDGE_TOPIC_TIMEOUT_S = 15.0
 
+# hailo_flight_node runs in its own venv (hailo_inference_env) because
+# hailo_platform is not installed in the dronepi conda env. The node is
+# launched via the explicit interpreter path so the active environment
+# (dronepi conda) is bypassed entirely — identical to how arducam_node
+# uses rpicam-vid as a subprocess rather than a Python import.
+HAILO_PYTHON      = Path.home() / "hailo_inference_env/bin/python3"
+HAILO_NODE_SCRIPT = PROJECT_ROOT / "unitree_drone_mapper/hailo/hailo_flight_node.py"
+# Matches main.py: PROJECT_ROOT/unitree_drone_mapper/hailo/hailo_flight_node.py
+# main.py's PROJECT_ROOT = ~/unitree_lidar_project/unitree_drone_mapper, so its
+# path is equivalent: PROJECT_ROOT/"hailo"/"hailo_flight_node.py".
+
 
 class FlightStack:
     """Owns the runtime scan stack subprocesses and basic health supervision."""
@@ -56,6 +67,8 @@ class FlightStack:
         self._bag_proc: Optional[subprocess.Popen] = None
         self._slam_proc: Optional[subprocess.Popen] = None
         self._bridge_proc: Optional[subprocess.Popen] = None
+        # hailo_flight_node — optional, skipped if HAILO_PYTHON or script absent
+        self._hailo_proc: Optional[subprocess.Popen] = None
 
     # ── Public state ─────────────────────────────────────────────────────────
 
@@ -93,6 +106,12 @@ class FlightStack:
                 f"source {ROS_SETUP} && source {WS_SETUP} && ros2 run unitree_lidar_ros2 bridge_node"
             )
 
+            # hailo_flight_node — launched after SLAM bridge so that
+            # /mavros/local_position/pose (used for AGL) is already available.
+            # Skipped gracefully if the interpreter or script is not present
+            # so the stack still starts on a system without Hailo configured.
+            self._hailo_proc = self._spawn_hailo()
+
             self._running = True
             log(f"[STACK] Started (reason={reason})")
             return True
@@ -110,13 +129,19 @@ class FlightStack:
             return
 
         log("[STACK] Stopping stack...")
+        # Stop order (reverse of start): bag → hailo → bridge → slam
+        # Bag stops first so it captures any final Hailo flow messages.
+        # Hailo stops before the bridge because it publishes to ROS topics
+        # that the bridge may be consuming.
+        self._terminate_proc(self._bag_proc, "rosbag")
+        self._terminate_proc(self._hailo_proc, "hailo_flight_node")
         self._terminate_proc(self._bridge_proc, "bridge")
         self._terminate_proc(self._slam_proc, "slam")
-        self._terminate_proc(self._bag_proc, "rosbag")
 
+        self._bag_proc = None
+        self._hailo_proc = None
         self._bridge_proc = None
         self._slam_proc = None
-        self._bag_proc = None
         self._running = False
 
         duration_s = time.time() - self._started_at if self._started_at else 0.0
@@ -153,6 +178,13 @@ class FlightStack:
             log(f"[STACK][HEALTH] bridge exited unexpectedly with code {self._bridge_proc.returncode}")
             bad = True
 
+        # Hailo is optional — log exit but do not set bad=True so the
+        # watchdog does not abort the scan session over a non-critical process.
+        if self._hailo_proc is not None and self._hailo_proc.poll() is not None:
+            log(f"[STACK][HEALTH] hailo_flight_node exited (code {self._hailo_proc.returncode}) "
+                f"— flow augmentation inactive for this session")
+            self._hailo_proc = None
+
         if bad:
             log("[STACK][HEALTH] One or more stack processes died")
 
@@ -187,10 +219,47 @@ class FlightStack:
         except Exception as exc:
             log(f"[STACK] Failed to stop {label}: {exc}")
 
+    def _spawn_hailo(self) -> Optional[subprocess.Popen]:
+        """Launch hailo_flight_node.py in hailo_inference_env.
+
+        Returns the Popen handle on success, or None if the interpreter or
+        script is absent. None return is treated as graceful skip — the scan
+        session continues without Hailo flow augmentation.
+
+        hailo_flight_node publishes /hailo/optical_flow and /hailo/ground_class
+        over ROS 2 DDS. FlowBridge (in the main conda env) consumes the flow
+        topic and forwards it to /mavros/odometry/out for EKF2 fusion.
+
+        The explicit interpreter path (hailo_inference_env/bin/python3) is used
+        rather than relying on the active environment because hailo_platform is
+        only installed in hailo_inference_env — not in the dronepi conda env
+        that the watchdog systemd service activates.
+
+        ROS 2 setup files are sourced inside the bash command so the node can
+        publish and subscribe to ROS 2 topics despite running outside the
+        dronepi conda env.
+        """
+        if not HAILO_PYTHON.exists():
+            log("[STACK] hailo_inference_env not found — Hailo node skipped")
+            return None
+        if not HAILO_NODE_SCRIPT.exists():
+            log(f"[STACK] hailo_flight_node.py not found at {HAILO_NODE_SCRIPT} — skipped")
+            return None
+
+        cmd = (
+            f"source {ROS_SETUP} && source {WS_SETUP} && "
+            f"{HAILO_PYTHON} {HAILO_NODE_SCRIPT}"
+        )
+        proc = self._spawn(cmd)
+        log(f"[STACK] hailo_flight_node started (pid={proc.pid})")
+        return proc
+
     def _cleanup_partial_start(self) -> None:
+        self._terminate_proc(self._bag_proc, "rosbag")
+        self._terminate_proc(self._hailo_proc, "hailo_flight_node")
         self._terminate_proc(self._bridge_proc, "bridge")
         self._terminate_proc(self._slam_proc, "slam")
-        self._terminate_proc(self._bag_proc, "rosbag")
+        self._bag_proc = None
+        self._hailo_proc = None
         self._bridge_proc = None
         self._slam_proc = None
-        self._bag_proc = None

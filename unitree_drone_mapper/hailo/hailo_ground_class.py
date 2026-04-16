@@ -107,17 +107,22 @@ class HailoGroundClassifier:
         self._conf_threshold = conf_threshold
         self._latency_buf    = []
 
+        # hailort >= 4.23.0: make_from_network_group() returns Dict[str, VStreamParams].
+        # Store as dict; pre-4.23.0 returned a list — normalise for uniform access.
+        # InferVStreams requires dicts — pass directly, not converted to lists.
         try:
             from hailo_platform import (
                 InputVStreamParams, OutputVStreamParams,
                 FormatType
             )
-            self._input_params  = InputVStreamParams.make_from_network_group(
+            _in  = InputVStreamParams.make_from_network_group(
                 network_group, quantized=False, format_type=FormatType.UINT8
             )
-            self._output_params = OutputVStreamParams.make_from_network_group(
+            _out = OutputVStreamParams.make_from_network_group(
                 network_group, quantized=False, format_type=FormatType.FLOAT32
             )
+            self._input_params  = _in  if isinstance(_in,  dict) else {p.name: p for p in _in}
+            self._output_params = _out if isinstance(_out, dict) else {p.name: p for p in _out}
         except Exception as exc:
             raise RuntimeError(f"Failed to create vstream params: {exc}") from exc
 
@@ -143,13 +148,16 @@ class HailoGroundClassifier:
         try:
             from hailo_platform import InferVStreams
 
-            input_name = list(self._input_params)[0].name
-            with InferVStreams(
-                self._network_group,
-                self._input_params,
-                self._output_params,
-            ) as pipeline:
-                raw = pipeline.infer({input_name: tensor})
+            # activate() required in hailort >= 4.23.0 before InferVStreams.
+            # input_name extracted from dict keys (not .name on a list element).
+            input_name = list(self._input_params.keys())[0]
+            with self._network_group.activate():
+                with InferVStreams(
+                    self._network_group,
+                    self._input_params,
+                    self._output_params,
+                ) as pipeline:
+                    raw = pipeline.infer({input_name: tensor})
 
             latency_ms = (time.monotonic() - t0) * 1000.0
             self._latency_buf.append(latency_ms)
@@ -188,7 +196,10 @@ class HailoGroundClassifier:
         The exact layout depends on the HEF compilation — try both formats.
         """
         output_key  = list(raw_outputs.keys())[0]
-        output_data = raw_outputs[output_key].astype(np.float32)
+        # hailort 4.23.0: infer() may return a list of arrays per output
+        # rather than a single ndarray. np.array() coerces both forms to
+        # a single ndarray before .astype() — safe for both API versions.
+        output_data = np.array(raw_outputs[output_key]).astype(np.float32)
 
         detections = []
 

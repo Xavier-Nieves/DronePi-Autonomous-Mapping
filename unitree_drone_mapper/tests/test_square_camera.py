@@ -64,19 +64,20 @@ Usage
   # Custom
   python3 tests/test_square_camera.py --alt 3 --side 3 --pics 5 --hold 8
 
-  # With collision avoidance active (stops only watchdog, keeps dronepi-main)
-  python3 tests/test_square_camera.py --keep-collision
+  # Collision avoidance remains active by default (stops only watchdog)
+  python3 tests/test_square_camera.py
 
   # Skip service management
   python3 tests/test_square_camera.py --no-service-stop
 
 Service management
 ------------------
-  Default: stops drone-watchdog and dronepi-main.
-  --keep-collision: stops only drone-watchdog, leaves dronepi-main running
-  so collision_monitor.py publishes obstacle distances and AGL to PX4.
+  Default: stops only drone-watchdog and leaves dronepi-main running so
+  collision_monitor.py continues publishing obstacle distances and AGL.
 
-  dronepi-main does NOT launch Point-LIO. This script does. No conflict.
+  This script now reuses an already-running Point-LIO instance when
+  /aft_mapped_to_init is already active. It only launches its own local
+  Point-LIO if no running SLAM publisher is detected.
 
   The bench_scan mission lock is written before arming to prevent main.py
   from entering autonomous mode when it detects armed=True + OFFBOARD.
@@ -113,7 +114,7 @@ _TESTS_DIR    = Path(__file__).resolve().parent
 _MAPPER_DIR   = _TESTS_DIR.parent
 _ROS_SETUP    = "/opt/ros/jazzy/setup.bash"
 _WS_SETUP     = Path.home() / "unitree_lidar_project/RPI5/ros2_ws/install/setup.bash"
-_ARDUCAM_NODE = _MAPPER_DIR / "nodes" / "arducam_node.py"
+_ARDUCAM_NODE = _MAPPER_DIR / "flight" / "arducam_node.py"
 _CALIB_PATH   = _MAPPER_DIR / "config" / "camera_calibration.yaml"
 OUTPUT_DIR    = _TESTS_DIR / "square_camera_output"
 BAG_DIR       = OUTPUT_DIR / "bags"
@@ -259,10 +260,18 @@ def _stop_proc(name: str, proc: Optional[subprocess.Popen]) -> None:
 def _wait_topic(topic: str, timeout: float = 25.0, min_hz: float = 1.0) -> bool:
     print(f"  Waiting for {topic}  ({timeout:.0f}s timeout)", end="", flush=True)
     deadline = time.time() + timeout
+
+    # sensor_msgs/Image from ArducamNode is published with BEST_EFFORT QoS.
+    # Use matching QoS in ros2 topic hz or the CLI subscriber may see zero
+    # samples even while the node is publishing correctly.
+    qos = ""
+    if topic == "/arducam/image_raw":
+        qos = " --qos-reliability best_effort --qos-durability volatile"
+
     while time.time() < deadline:
         r = subprocess.run(
             ["bash", "-c",
-             _ros_source() + f"timeout 3 ros2 topic hz {topic} --window 5 2>&1"],
+             _ros_source() + f"timeout 3 ros2 topic hz {topic} --window 5{qos} 2>&1"],
             capture_output=True, text=True,
         )
         for line in r.stdout.splitlines():
@@ -276,6 +285,45 @@ def _wait_topic(topic: str, timeout: float = 25.0, min_hz: float = 1.0) -> bool:
                     pass
         print(".", end="", flush=True)
         time.sleep(1.5)
+    print(" TIMEOUT")
+    return False
+
+
+def _wait_arducam_ready(proc: Optional[subprocess.Popen], log_path: Path, timeout: float = 15.0) -> bool:
+    """Wait for ArducamNode readiness without relying on ros2 topic hz QoS support.
+
+    On this Pi/ROS CLI build, `ros2 topic hz` does not expose the QoS override
+    flags needed for BEST_EFFORT image topics. Instead, treat the node as ready
+    when either discovery shows /arducam/image_raw or the node log confirms that
+    frames are being published. Also fail fast if the process exits.
+    """
+    print(f"  Waiting for /arducam/image_raw  ({timeout:.0f}s timeout)", end="", flush=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            print(" PROCESS EXIT")
+            return False
+
+        r = subprocess.run(
+            ["bash", "-c", _ros_source() + "ros2 topic list 2>/dev/null"],
+            capture_output=True, text=True,
+        )
+        if "/arducam/image_raw" in r.stdout.splitlines():
+            print(" discovered  ✓")
+            return True
+
+        try:
+            if log_path.exists():
+                tail = log_path.read_text(errors="ignore")[-4000:]
+                if "Published " in tail or "ArducamNode started" in tail:
+                    print(" log-ready  ✓")
+                    return True
+        except Exception:
+            pass
+
+        print(".", end="", flush=True)
+        time.sleep(1.0)
+
     print(" TIMEOUT")
     return False
 
@@ -951,7 +999,7 @@ def main() -> None:
     parser.add_argument("--dry-run",         action="store_true",
                         help="Start services, check sensors, stop before arming")
     parser.add_argument("--keep-collision",  action="store_true",
-                        help="Stop only watchdog, keep dronepi-main for collision avoidance")
+                        help="Legacy flag — collision avoidance is now always kept active")
     parser.add_argument("--no-service-stop", action="store_true",
                         help="Skip service management entirely")
     args = parser.parse_args()
@@ -963,8 +1011,7 @@ def main() -> None:
     est_min  = est_s / 60
 
     coll_mode = ("SKIP" if args.no_service_stop
-                 else "watchdog only (collision ACTIVE)" if args.keep_collision
-                 else "full (watchdog + main stopped)")
+                 else "watchdog only (collision ACTIVE)")
 
     print("=" * 60)
     print("  DronePi — Square Camera Coverage Test")
@@ -994,26 +1041,35 @@ def main() -> None:
         except Exception as e:
             print(f"  [WARN] Could not write mission lock: {e}")
 
-    _svc_list = _SERVICES_WATCHDOG if args.keep_collision else _SERVICES_ALL
+    _svc_list = _SERVICES_WATCHDOG
     svc = ServiceManager(_svc_list)
     if not args.no_service_stop:
         svc.stop_all()
-        if args.keep_collision:
-            print("  [INFO] dronepi-main running — collision avoidance ACTIVE")
-            print("  [INFO] Verify: ls /tmp/dronepi_mission.lock → should show bench_scan")
+        print("  [INFO] dronepi-main running — collision avoidance ACTIVE")
+        print("  [INFO] Verify: ls /tmp/dronepi_mission.lock → should show bench_scan")
 
     plio_proc:    Optional[subprocess.Popen] = None
     arducam_proc: Optional[subprocess.Popen] = None
     flight        = None
     flight_ok     = False
 
+    using_existing_pointlio = False
+
     try:
-        print("\n[Setup 1/3] Starting Point-LIO...")
-        plio_proc = _launch("Point-LIO", _POINTLIO_CMD, _POINTLIO_LOG)
-        print(f"  PID: {plio_proc.pid}   log: tail -f {_POINTLIO_LOG}")
-        if not _wait_topic("/aft_mapped_to_init", timeout=30.0):
-            print("  [FAIL] Point-LIO not publishing after 30s")
-            return
+        print("\n[Setup 1/3] Checking Point-LIO...")
+        # Prefer an already-running standby Point-LIO instance when available.
+        # This avoids double-opening /dev/ttyUSB0 during bench tests while still
+        # allowing the script to self-start SLAM if nothing is publishing yet.
+        if _wait_topic("/aft_mapped_to_init", timeout=2.0):
+            using_existing_pointlio = True
+            print("  [OK] Reusing already-running Point-LIO on /aft_mapped_to_init")
+        else:
+            print("  [INFO] No active Point-LIO detected — starting local instance...")
+            plio_proc = _launch("Point-LIO", _POINTLIO_CMD, _POINTLIO_LOG)
+            print(f"  PID: {plio_proc.pid}   log: tail -f {_POINTLIO_LOG}")
+            if not _wait_topic("/aft_mapped_to_init", timeout=30.0):
+                print("  [FAIL] Point-LIO not publishing after 30s")
+                return
 
         print("\n[Setup 2/3] Starting ArducamNode...")
         if not _ARDUCAM_NODE.exists():

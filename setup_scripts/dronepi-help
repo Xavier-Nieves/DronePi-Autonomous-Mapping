@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# dronepi-help — DronePi field reference command
+#
+# Installation (run once):
+#   chmod +x ~/unitree_lidar_project/dronepi-help
+#   sudo ln -sf ~/unitree_lidar_project/dronepi-help /usr/local/bin/dronepi-help
+#
+# Usage:
+#   dronepi-help           → full reference
+#   dronepi-help services  → systemd service commands
+#   dronepi-help logs      → journalctl commands
+#   dronepi-help rpi       → RPi hardware / health
+#   dronepi-help ros       → ROS 2 / MAVROS commands
+#   dronepi-help network   → WiFi / hotspot / SSH
+#   dronepi-help pipeline  → post-flight pipeline
+#   dronepi-help git       → git workflow reminders
+#   dronepi-help ssd       → SSD / storage commands
+
+# ── colours ───────────────────────────────────────────────────────────────────
+BOLD='\033[1m'
+CYAN='\033[0;36m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+GREY='\033[0;37m'
+RESET='\033[0m'
+
+header() { echo -e "\n${BOLD}${CYAN}══ $1 ══${RESET}"; }
+sub()    { echo -e "\n${BOLD}${YELLOW}── $1 ──${RESET}"; }
+cmd()    { printf "  ${GREEN}%-52s${RESET} ${GREY}%s${RESET}\n" "$1" "$2"; }
+note()   { echo -e "  ${RED}⚠  $1${RESET}"; }
+info()   { echo -e "  ${GREY}→  $1${RESET}"; }
+
+# ── sections ──────────────────────────────────────────────────────────────────
+
+show_services() {
+    header "SYSTEMD SERVICES"
+
+    sub "Status"
+    cmd "sudo systemctl status <service>"          "full status + last 10 log lines"
+    cmd "sudo systemctl status drone-watchdog"     "watchdog (Point-LIO + bag recorder)"
+    cmd "sudo systemctl status dronepi-main"       "main orchestrator (autonomous)"
+    cmd "sudo systemctl status mavros"             "MAVROS → Pixhawk 6X bridge"
+    cmd "sudo systemctl status foxglove-bridge"    "Foxglove WebSocket on :8765"
+    cmd "sudo systemctl status drone-mesh-server"  "HTTP mesh server on :8080"
+    cmd "sudo systemctl status rpi-health"         "RPi health publisher → /rpi/health"
+    cmd "sudo systemctl status dronepi-hotspot"    "Wi-Fi hotspot watchdog (wlan0)"
+    cmd "sudo systemctl status led"                "GPIO LED observer service"
+    cmd "sudo systemctl status pointlio-standby"   "Point-LIO standby (LiDAR USB)"
+    cmd "sudo systemctl status slam-bridge"        "SLAM bridge → MAVROS vision pose"
+    cmd "sudo systemctl status meshview-telemetry" "Telemetry WS server on :9001"
+
+    sub "Start / Stop / Restart"
+    cmd "sudo systemctl start   <service>"         "start now"
+    cmd "sudo systemctl stop    <service>"         "stop now"
+    cmd "sudo systemctl restart <service>"         "restart"
+    cmd "sudo systemctl reload-or-restart <service>" "reload config if supported"
+
+    sub "Enable / Disable (boot)"
+    cmd "sudo systemctl enable  <service>"         "start on every boot"
+    cmd "sudo systemctl disable <service>"         "remove from boot"
+    cmd "sudo systemctl daemon-reload"             "reload unit files after editing"
+
+    sub "View all drone services at once"
+    cmd "sudo systemctl status drone-watchdog dronepi-main mavros foxglove-bridge drone-mesh-server rpi-health dronepi-hotspot led --no-pager --lines=3" ""
+}
+
+show_logs() {
+    header "JOURNALCTL — LOG VIEWING"
+
+    sub "Follow live output"
+    cmd "sudo journalctl -u drone-watchdog -f"     "watchdog live log"
+    cmd "sudo journalctl -u dronepi-main -f"       "main orchestrator live"
+    cmd "sudo journalctl -u mavros -f"             "MAVROS live"
+    cmd "sudo journalctl -u pointlio-standby -f"   "Point-LIO live"
+    cmd "sudo journalctl -u rpi-health -f"         "RPi health live"
+    cmd "sudo journalctl -u drone-mesh-server -f"  "HTTP server live"
+
+    sub "Last N lines"
+    cmd "sudo journalctl -u <service> -n 50"       "last 50 lines"
+    cmd "sudo journalctl -u <service> -n 50 --no-pager" "no pager (print all)"
+
+    sub "Time filters"
+    cmd "sudo journalctl -u <service> --since '10 min ago'" "last 10 minutes"
+    cmd "sudo journalctl -u <service> --since today"        "since midnight"
+    cmd "sudo journalctl -u <service> --since '2026-05-01 09:00' --until '2026-05-01 10:00'" "date range"
+
+    sub "Multi-service combined"
+    cmd "sudo journalctl -u mavros -u drone-watchdog -u foxglove-bridge -f" "combined live"
+
+    sub "Filters"
+    cmd "sudo journalctl -u <service> -p err"      "errors only"
+    cmd "sudo journalctl -u <service> | grep FAIL" "grep for failures"
+    cmd "sudo journalctl --disk-usage"             "total journal disk usage"
+    cmd "sudo journalctl --vacuum-size=200M"       "trim journal to 200 MB"
+}
+
+show_rpi() {
+    header "RASPBERRY PI 5 — HARDWARE & HEALTH"
+
+    sub "CPU / Memory / Temperature"
+    cmd "vcgencmd measure_temp"                    "CPU temperature (°C)"
+    cmd "vcgencmd get_throttled"                   "throttle flags (0x0 = healthy)"
+    cmd "vcgencmd measure_clock arm"               "current ARM clock frequency"
+    cmd "cat /sys/class/thermal/thermal_zone0/temp" "raw temp in millidegrees"
+    cmd "free -h"                                  "RAM usage (human readable)"
+    cmd "top -bn1 | head -20"                      "CPU + memory snapshot"
+    cmd "htop"                                     "interactive process monitor"
+
+    sub "Throttle flag decoder (vcgencmd get_throttled)"
+    info "0x00000  = healthy, no throttling"
+    info "0x00001  = undervoltage detected"
+    info "0x00002  = arm frequency capped"
+    info "0x00004  = currently throttled"
+    info "0x00008  = soft temperature limit active"
+    info "0x10000  = undervoltage has occurred (latched)"
+    note "Bit 0x4 active = currently throttled — check power supply / buck converter"
+
+    sub "CPU frequency scaling"
+    cmd "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq" "current freq (kHz)"
+    cmd "cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq" "max freq (kHz)"
+
+    sub "Uptime / Load"
+    cmd "uptime"                                   "uptime + 1/5/15 min load avg"
+    cmd "cat /proc/loadavg"                        "raw load average"
+
+    sub "GPIO / Hardware"
+    cmd "ls /dev/hailo*"                           "Hailo-8L PCIe device"
+    cmd "ls /dev/ttyUSB*"                          "Unitree L2 LiDAR serial port"
+    cmd "ls /dev/ttyACM*"                          "Pixhawk 6X USB serial"
+    cmd "lsusb"                                    "all connected USB devices"
+    cmd "dmesg | tail -30"                         "recent kernel messages (USB events etc.)"
+    cmd "udevadm trigger"                          "re-run udev rules (e.g. after cable plug)"
+
+    sub "SSD / Storage"
+    cmd "df -h"                                    "disk usage all mounts"
+    cmd "df -h /mnt/ssd"                           "SSD usage only"
+    cmd "mountpoint -q /mnt/ssd && echo mounted || echo NOT MOUNTED" "check SSD mount"
+    cmd "sudo mount -a"                            "mount all fstab entries (mount SSD)"
+    cmd "lsblk"                                    "block device tree"
+    cmd "sudo smartctl -a /dev/sda"                "SSD health (install smartmontools)"
+}
+
+show_ros() {
+    header "ROS 2 JAZZY / MAVROS"
+
+    note "Always source ROS before manual ros2 commands:"
+    cmd "source /opt/ros/jazzy/setup.bash && source ~/unitree_lidar_project/RPI5/ros2_ws/install/setup.bash" ""
+
+    sub "Topic inspection"
+    cmd "ros2 topic list"                          "all active topics"
+    cmd "ros2 topic hz /cloud_registered"          "Point-LIO publish rate (target ≥5 Hz)"
+    cmd "ros2 topic hz /mavros/vision_pose/pose"   "SLAM bridge rate (target ≥8 Hz)"
+    cmd "ros2 topic hz /aft_mapped_to_init"        "Point-LIO odometry rate"
+    cmd "ros2 topic hz /rpi/health"                "RPi health node rate (target 0.5 Hz)"
+    cmd "ros2 topic echo /mavros/state"            "FCU arm/mode status"
+    cmd "ros2 topic echo /mavros/global_position/rel_alt" "altitude above home (m)"
+    cmd "ros2 topic echo /dronepi/collision_zone"  "CLEAR / CAUTION / OBSTACLE"
+    cmd "ros2 topic echo /hailo/optical_flow"      "Hailo flow bridge output"
+
+    sub "Node inspection"
+    cmd "ros2 node list"                           "all active nodes"
+    cmd "ros2 node info /dronepi_main"             "main orchestrator subscriptions"
+    cmd "ros2 node info /mavros"                   "MAVROS publications / services"
+
+    sub "Service calls"
+    cmd "ros2 service call /mavros/cmd/arming mavros_msgs/srv/CommandBool '{value: false}'" "disarm"
+    cmd "ros2 service call /mavros/set_mode mavros_msgs/srv/SetMode '{custom_mode: AUTO.LAND}'" "set AUTO.LAND"
+
+    sub "Bag recording (manual)"
+    cmd "ros2 bag record -o /mnt/ssd/rosbags/test_scan /cloud_registered /aft_mapped_to_init /mavros/state" "record key topics"
+    cmd "ros2 bag info /mnt/ssd/rosbags/<session>"  "bag metadata"
+    cmd "ros2 bag play /mnt/ssd/rosbags/<session>"  "replay a bag"
+
+    sub "EKF2 / MAVROS parameters (via QGC or mavros_params)"
+    info "EKF2_EV_CTRL = 15   → all vision bits (pos + height + velocity + yaw)"
+    info "EKF2_HGT_REF = 3    → vision as primary height reference"
+    info "EKF2_EV_DELAY = 30  → tune to observed Pi→Pixhawk latency (ms)"
+}
+
+show_network() {
+    header "NETWORK / HOTSPOT / SSH"
+
+    sub "Hotspot status"
+    cmd "ip addr show wlan0"                       "wlan0 IP address (should be 10.42.0.1)"
+    cmd "nmcli connection show dronepi-hotspot"    "hotspot profile details"
+    cmd "nmcli connection up dronepi-hotspot"      "bring hotspot up manually"
+    cmd "nmcli device status"                      "all network device states"
+
+    sub "Hotspot SSID / password"
+    info "SSID     : dronepi-ap"
+    info "Password : dronepi123"
+    info "Pi IP    : 10.42.0.1"
+
+    sub "SSH access (from laptop on dronepi-ap)"
+    cmd "ssh dronepi@10.42.0.1"                    "SSH into Pi"
+    cmd "ssh -NL 8080:localhost:8080 dronepi@10.42.0.1" "SSH tunnel for mesh viewer"
+    cmd "ssh -NL 8765:localhost:8765 dronepi@10.42.0.1" "SSH tunnel for Foxglove WS"
+
+    sub "Viewer URLs (on dronepi-ap WiFi)"
+    info "Mesh viewer    : http://10.42.0.1:8080/meshview.html"
+    info "Flight DB API  : http://10.42.0.1:8080/api/flights"
+    info "Foxglove WS    : ws://10.42.0.1:8765"
+    info "Telemetry WS   : ws://10.42.0.1:9001"
+
+    sub "Firewall (UFW)"
+    cmd "sudo ufw status"                          "current firewall rules"
+    cmd "sudo ufw allow 8080/tcp"                  "open mesh server port"
+    cmd "sudo ufw allow 8765/tcp"                  "open Foxglove WS port"
+    cmd "sudo ufw allow 9001/tcp"                  "open telemetry WS port"
+}
+
+show_pipeline() {
+    header "POST-FLIGHT PIPELINE"
+
+    sub "Manual trigger"
+    cmd "python3 ~/unitree_lidar_project/unitree_drone_mapper/utils/run_postflight.py" "process latest bag"
+    cmd "python3 run_postflight.py --bag /mnt/ssd/rosbags/<session>"  "process specific bag"
+    cmd "python3 run_postflight.py --latest --skip-wait"              "skip bag-close wait"
+
+    sub "postprocess_mesh.py flags"
+    cmd "python3 postprocess_mesh.py --bag <path> --fast"             "fast mode (lower quality)"
+    cmd "python3 postprocess_mesh.py --bag <path> --debug"            "save intermediate PLYs"
+    cmd "python3 postprocess_mesh.py --bag <path> --no-mls"           "skip MLS smoothing"
+    cmd "python3 postprocess_mesh.py --bag <path> --no-mesh"          "cloud only, no mesh"
+    cmd "python3 postprocess_mesh.py --bag <path> --no-texture"       "skip texture projection"
+    cmd "python3 postprocess_mesh.py --bag <path> --ground-threshold 0.3 --ground-cell-size 0.5" "tune ground classifier"
+    cmd "python3 postprocess_mesh.py --bag <path> --texture-frames 50" "limit camera frames"
+
+    sub "Flight history"
+    cmd "python3 ~/unitree_lidar_project/unitree_drone_mapper/utils/flight_logger.py" "print all flights"
+    cmd "python3 flight_logger.py --last 5"        "last 5 flights"
+    cmd "python3 flight_logger.py --summary"       "summary statistics"
+    cmd "python3 flight_logger.py --failures"      "failed flights only"
+
+    sub "Point cloud analysis"
+    cmd "python3 analyze_cloud.py --bag <path>"    "full CSV/Excel cloud stats"
+    cmd "python3 analyze_cloud.py --ply <path>"    "analyze from PLY file"
+
+    sub "Mission lock file"
+    cmd "cat /tmp/dronepi_mission.lock"            "current lock mode (manual_scan / autonomous)"
+    cmd "rm /tmp/dronepi_mission.lock"             "clear stale lock (use with caution)"
+    cmd "cat /tmp/watchdog_status.json"            "watchdog heartbeat + flags"
+    cmd "cat /tmp/postflight_status.json"          "pipeline stage (while running)"
+    cmd "cat /tmp/main_status.json"                "main.py heartbeat + Hailo/GPS flags"
+}
+
+show_git() {
+    header "GIT — MULTI-MACHINE WORKFLOW"
+
+    note "Always use rebase to sync — avoids diverged branch conflicts"
+    cmd "git pull --rebase"                        "sync from remote (Pi or laptop)"
+    cmd "git push"                                 "push local commits to GitHub"
+
+    sub "Status / diff"
+    cmd "git status"                               "working tree status"
+    cmd "git diff"                                 "unstaged changes"
+    cmd "git log --oneline -10"                    "last 10 commits"
+
+    sub "Commit"
+    cmd "git add -A && git commit -m 'message'"    "stage all and commit"
+    cmd "git add <file> && git commit -m 'message'" "stage specific file"
+
+    sub "Conflict resolution"
+    cmd "git config --global pull.rebase true"     "set rebase as default pull strategy"
+    cmd "git mergetool"                            "open VS Code 3-way merge editor"
+    cmd "git rebase --abort"                       "abort a failed rebase"
+    cmd "git rebase --continue"                    "continue after resolving conflict"
+
+    sub "Remote"
+    cmd "git remote -v"                            "show remote URLs"
+    info "Repo: https://github.com/Xavier-Nieves/unitree_lidar_project"
+}
+
+show_ssd() {
+    header "SSD / STORAGE"
+
+    sub "Mount / unmount"
+    cmd "sudo mount -a"                            "mount all /etc/fstab entries"
+    cmd "sudo mount /mnt/ssd"                      "mount SSD specifically"
+    cmd "sudo umount /mnt/ssd"                     "unmount SSD (before disconnecting)"
+    cmd "mountpoint -q /mnt/ssd && echo OK || echo FAIL" "check if mounted"
+
+    sub "Usage"
+    cmd "df -h /mnt/ssd"                           "SSD free/used space"
+    cmd "du -sh /mnt/ssd/rosbags/*"                "size per bag session"
+    cmd "du -sh /mnt/ssd/maps/*"                   "size per maps session"
+    cmd "ls -lh /mnt/ssd/rosbags/ | tail -10"      "latest 10 bag sessions"
+
+    sub "Health"
+    cmd "sudo fsck -n /dev/sda1"                   "check filesystem (read-only)"
+    cmd "lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT"     "block device info"
+    note "SSD previously had EXT4 corruption — always unmount cleanly before removing power"
+
+    sub "Config reminder"
+    note "capture_interval_s must be 2.0 in config.yaml before survey flight (currently was 10.0)"
+    cmd "grep capture_interval ~/unitree_lidar_project/unitree_drone_mapper/config.yaml" "verify value"
+
+    sub "Foxglove token"
+    note "Exposed device token was: fox_dt_c2B95a8E7aGS99khJNfJegy0vQHwCOEd"
+    note "Revoke at: app.foxglove.dev → Devices → dronepi-lidar → Revoke"
+}
+
+show_all() {
+    echo -e "${BOLD}${CYAN}"
+    echo "╔══════════════════════════════════════════════════╗"
+    echo "║           DronePi Field Reference               ║"
+    echo "║   Tarot 810 · RPi 5 · Pixhawk 6X · Unitree L2  ║"
+    echo "╚══════════════════════════════════════════════════╝"
+    echo -e "${RESET}"
+    echo -e "  Usage: ${GREEN}dronepi-help${RESET} [section]"
+    echo ""
+    echo -e "  Sections:"
+    cmd "dronepi-help services"  "systemd service start/stop/status"
+    cmd "dronepi-help logs"      "journalctl log viewing"
+    cmd "dronepi-help rpi"       "RPi 5 hardware, temperature, GPIO"
+    cmd "dronepi-help ros"       "ROS 2, MAVROS, topic inspection"
+    cmd "dronepi-help network"   "hotspot, SSH, viewer URLs"
+    cmd "dronepi-help pipeline"  "post-flight mesh pipeline"
+    cmd "dronepi-help git"       "git multi-machine workflow"
+    cmd "dronepi-help ssd"       "SSD mount, storage, health"
+    echo ""
+    echo -e "  No argument → prints all sections"
+    echo ""
+    show_services
+    show_logs
+    show_rpi
+    show_ros
+    show_network
+    show_pipeline
+    show_git
+    show_ssd
+    echo ""
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+case "${1:-all}" in
+    services) show_services ;;
+    logs)     show_logs     ;;
+    rpi)      show_rpi      ;;
+    ros)      show_ros      ;;
+    network)  show_network  ;;
+    pipeline) show_pipeline ;;
+    git)      show_git      ;;
+    ssd)      show_ssd      ;;
+    all|"")   show_all      ;;
+    *)
+        echo -e "${RED}Unknown section: $1${RESET}"
+        echo "Valid sections: services logs rpi ros network pipeline git ssd"
+        exit 1
+        ;;
+esac
+
+echo ""

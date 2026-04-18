@@ -101,3 +101,9 @@ class PostflightIPC:
             os.replace(_STATUS_FILE_TMP, _STATUS_FILE)
         except Exception as exc:
             print(f"  [PostflightIPC] Status write failed: {exc}")
+            
+    def __init__(self) -> None:
+        self._stage  = ""
+        self._failed = False
+        self._done   = False
+        self.clear()   # ← ADD: remove stale file from previous boot/crash

@@ -1,10 +1,19 @@
 [Unit]
 Description=DronePi LED GPIO Service
-# Starts independently of the watchdog — LED service must be running before
-# the watchdog so the WAITING_FCU state is visible from the first write.
-# drone-watchdog does not Require= this service; if LED fails, the watchdog
-# continues operating — LED is informational, not safety-critical.
-After=multi-user.target
+# ── Boot ordering fix ─────────────────────────────────────────────────────────
+# led.service must start AFTER drone-watchdog.service has written its first
+# heartbeat to /tmp/watchdog_status.json. Without this ordering the LED node
+# reads watchdog_ts=0 on every poll cycle and _derive_state() always returns
+# "OFF", producing no visible output until the watchdog is manually restarted.
+#
+# Wants= (not Requires=) so that if the watchdog is not installed or fails to
+# start, the LED service still comes up — LED is informational, not safety-critical.
+#
+# drone-watchdog writes its first status within ~1.5 s of starting (after the
+# _MIN_TRANSIENT_S SYSTEM_START hold). The ExecStartPre sleep below covers
+# that window before the LED poll loop begins.
+After=multi-user.target drone-watchdog.service
+Wants=drone-watchdog.service
 
 [Service]
 Type=simple
@@ -12,24 +21,23 @@ User=dronepi
 Group=gpio
 
 # Force lgpio backend — required for Pi 5 / Ubuntu 24.
-# lgpio talks directly to /dev/gpiochip* (character device interface).
-# No daemon process is required.
 Environment="GPIOZERO_PIN_FACTORY=lgpio"
-
-# lgpio creates notify pipes relative to WorkingDirectory.
-# Must be a writable path — /tmp is correct here.
 Environment="HOME=/tmp"
 WorkingDirectory=/tmp
 
-# Activate the conda environment before running.
-# The dronepi env contains gpiozero and lgpio installed via pip.
+# Wait for drone-watchdog to write its first heartbeat before starting the
+# LED poll loop. 4 seconds covers: watchdog ROS init (~1 s) + SYSTEM_START
+# transient hold (_MIN_TRANSIENT_S = 2.5 s) + scheduling margin (0.5 s).
+# Without this delay the LED loop would read watchdog_ts=0 and show OFF
+# for the first few seconds even though the watchdog is running.
+ExecStartPre=/bin/sleep 4
+
 ExecStart=/bin/bash -c "\
     source /home/dronepi/miniforge3/etc/profile.d/conda.sh && \
     conda activate dronepi && \
     python3 /home/dronepi/unitree_lidar_project/unitree_drone_mapper/flight/led_service.py"
 
 # Always restart — LED service must stay alive regardless of crash reason.
-# If GPIO hardware is unavailable at boot, systemd will retry every 5s.
 Restart=always
 RestartSec=5
 

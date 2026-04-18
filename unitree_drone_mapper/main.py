@@ -1021,15 +1021,30 @@ def _run_drift_check(
 
 # ── Camera Helpers ────────────────────────────────────────────────────────────
 
-def _start_camera(session_id: str):
-    """Import and start CameraCapture. Returns instance or None if unavailable."""
+def _start_camera(session_id: str, node=None):
+    """
+    Import and start the unified mission camera owner.
+
+    CameraCapture now keeps one persistent Picamera2/libcamera instance alive
+    for the full mission. That single owner serves both waypoint photo capture
+    and the temporary ROS live stream on /arducam/image_raw so Foxglove can see
+    live frames without launching a second camera process.
+    """
     try:
         sys.path.insert(0, str(PROJECT_ROOT))
         from flight.camera_capture import CameraCapture
-        cam = CameraCapture(session_id=session_id)
-        ok  = cam.start()
+        cam = CameraCapture(
+            session_id=session_id,
+            ros_node=node,
+            enable_ros_publish=(node is not None),
+            ros_publish_topic="/arducam/image_raw",
+            ros_publish_fps=5.0,
+        )
+        ok = cam.start()
         if ok:
             log(f"[CAM] IMX477 started — output: {cam.output_dir}")
+            if node is not None:
+                log("[CAM] Live ROS image stream enabled on /arducam/image_raw")
             return cam
         else:
             log("[CAM] WARN — CameraCapture.start() failed (picamera2 unavailable?)")
@@ -1314,7 +1329,7 @@ def handle_autonomous(node: MainNode) -> None:
             log(f"[WARN] FlowBridge failed to initialise: {exc} — velocity augmentation disabled")
 
     # ── 4. Start Camera ───────────────────────────────────────────────────────
-    cam = _start_camera(f"scan_{ts}")
+    cam = _start_camera(f"scan_{ts}", node=node._node)
     if cam is not None:
         log(f"[CAM] Waiting {CAMERA_INIT_S}s for AEC/AWB convergence...")
         time.sleep(CAMERA_INIT_S)

@@ -40,7 +40,8 @@ class MeshviewTelemetryBridge(Node):
     def __init__(self):
         super().__init__("meshview_telemetry_bridge")
 
-        self.clients: Set[websockets.WebSocketServerProtocol] = set()
+        # Named _ws_clients to avoid collision with rclpy.Node.clients property.
+        self._ws_clients: Set[websockets.WebSocketServerProtocol] = set()
 
         self.latest: Dict[str, Any] = {
             "vehicle": {
@@ -63,6 +64,7 @@ class MeshviewTelemetryBridge(Node):
                 "disk_pct": None,
                 "cpu_freq_mhz": None,
                 "throttled": None,
+                "uptime_s": None,
             },
         }
 
@@ -77,27 +79,27 @@ class MeshviewTelemetryBridge(Node):
         self.get_logger().info(f"MeshView telemetry bridge ready on ws://{WS_HOST}:{WS_PORT}")
 
     async def register(self, websocket):
-        self.clients.add(websocket)
+        self._ws_clients.add(websocket)
         await websocket.send(json.dumps({
             "op": "snapshot",
             "data": self.latest,
         }))
 
     def unregister(self, websocket):
-        self.clients.discard(websocket)
+        self._ws_clients.discard(websocket)
 
     async def _broadcast(self, payload: Dict[str, Any]):
-        if not self.clients:
+        if not self._ws_clients:
             return
         msg = json.dumps(payload)
         dead = set()
-        for ws in self.clients:
+        for ws in self._ws_clients:
             try:
                 await ws.send(msg)
             except Exception:
                 dead.add(ws)
         for ws in dead:
-            self.clients.discard(ws)
+            self._ws_clients.discard(ws)
 
     def broadcast_now(self, payload: Dict[str, Any]):
         try:
@@ -152,12 +154,17 @@ class MeshviewTelemetryBridge(Node):
         except Exception:
             return
 
-        self.latest["rpi"]["cpu_pct"] = data.get("cpu_percent")
-        self.latest["rpi"]["cpu_temp_c"] = data.get("cpu_temp_c")
-        self.latest["rpi"]["mem_pct"] = data.get("memory_percent")
-        self.latest["rpi"]["disk_pct"] = data.get("disk_percent")
+        # Field names must match rpi_health_node.py output exactly.
+        # cpu_temp      (not cpu_temp_c)
+        # mem_percent   → renamed to mem_pct in latest dict
+        # disk_percent  → renamed to disk_pct in latest dict
+        self.latest["rpi"]["cpu_pct"]      = data.get("cpu_percent")
+        self.latest["rpi"]["cpu_temp_c"]   = data.get("cpu_temp")
+        self.latest["rpi"]["mem_pct"]      = data.get("mem_percent")
+        self.latest["rpi"]["disk_pct"]     = data.get("disk_percent")
         self.latest["rpi"]["cpu_freq_mhz"] = data.get("cpu_freq_mhz")
-        self.latest["rpi"]["throttled"] = data.get("throttled")
+        self.latest["rpi"]["throttled"]    = data.get("throttled")
+        self.latest["rpi"]["uptime_s"]     = data.get("uptime_s")
         self.broadcast_now({"op": "rpi", "data": self.latest["rpi"]})
 
 

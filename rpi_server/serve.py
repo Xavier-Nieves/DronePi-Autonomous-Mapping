@@ -31,21 +31,24 @@ import sys
 import json
 import logging
 import re
+import http.client
+import threading
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, HTTPServer
-import sys as _sys
-
-_sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from unitree_drone_mapper.config_loader import load_config as _load_config
-
 
 # ── config ────────────────────────────────────────────────────────────────────
-_cfg = _load_config()
 
-SERVE_DIR  = _cfg["paths"]["maps_dir"]
-ROSBAG_DIR = _cfg["paths"]["rosbags_dir"]
-PORT       = _cfg["server"]["port"]
-BIND_ADDR  = _cfg["server"]["bind_addr"]
+SERVE_DIR  = "/mnt/ssd/maps"
+ROSBAG_DIR = "/mnt/ssd/rosbags"
+PORT       = 8080
+BIND_ADDR  = "0.0.0.0"
+
+# Camera stream proxy — forwards /stream and /snapshot to camera_stream_server
+# on localhost:8081. This keeps the browser talking to a single origin (port 8080)
+# and avoids cross-port CORS issues. If camera_stream_server is not running,
+# requests to /stream return 503 gracefully rather than crashing serve.py.
+CAM_STREAM_HOST = "127.0.0.1"
+CAM_STREAM_PORT = 8081
 
 # Directory name pattern written by ros2 bag record:
 #   scan_YYYYMMDD_HHMMSS   e.g. scan_20260317_091400
@@ -292,12 +295,98 @@ class CORSHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/flights":
             self._serve_flights()
             return
+        # ── /stream — proxy MJPEG stream from camera_stream_server:8081 ───────
+        if self.path == "/stream":
+            self._proxy_camera_stream()
+            return
+        # ── /snapshot — proxy single JPEG from camera_stream_server:8081 ──────
+        if self.path == "/snapshot":
+            self._proxy_camera_snapshot()
+            return
         # ── /rosbags/<session>/<file.ply> — serve PLY files from rosbags dir ──
         if self.path.startswith("/rosbags/"):
             self._serve_rosbag_file()
             return
         # All other requests: fall through to static file serving
         super().do_GET()
+
+    def _proxy_camera_stream(self):
+        """
+        Proxy the MJPEG stream from camera_stream_server (port 8081) to the
+        browser. Streams indefinitely until the client disconnects.
+
+        Design note — why proxy instead of redirect:
+          A 302 redirect to http://rpi:8081/stream would work on the LAN but
+          breaks when the viewer is accessed through a tunnel or when the
+          browser enforces same-origin policy. Proxying through port 8080 keeps
+          the origin consistent regardless of network topology.
+        """
+        try:
+            conn = http.client.HTTPConnection(
+                CAM_STREAM_HOST, CAM_STREAM_PORT, timeout=4
+            )
+            conn.request("GET", "/stream")
+            upstream = conn.getresponse()
+
+            if upstream.status != 200:
+                self.send_response(upstream.status)
+                self.end_headers()
+                return
+
+            # Forward the upstream Content-Type (carries the MJPEG boundary param)
+            content_type = upstream.getheader(
+                "Content-Type",
+                "multipart/x-mixed-replace; boundary=mjpegframe"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store, no-cache")
+            self.end_headers()
+
+            # Stream bytes directly — no buffering, minimum latency
+            while True:
+                chunk = upstream.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+
+        except (ConnectionRefusedError, http.client.HTTPException, OSError):
+            # camera_stream_server not running — return 503, don't crash serve.py
+            try:
+                self.send_response(503)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"Camera stream unavailable")
+            except OSError:
+                pass
+
+    def _proxy_camera_snapshot(self):
+        """Proxy a single JPEG snapshot from camera_stream_server:8081/snapshot."""
+        try:
+            conn = http.client.HTTPConnection(
+                CAM_STREAM_HOST, CAM_STREAM_PORT, timeout=4
+            )
+            conn.request("GET", "/snapshot")
+            upstream = conn.getresponse()
+            body = upstream.read()
+
+            self.send_response(upstream.status)
+            self.send_header(
+                "Content-Type",
+                upstream.getheader("Content-Type", "image/jpeg")
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        except (ConnectionRefusedError, http.client.HTTPException, OSError):
+            try:
+                self.send_response(503)
+                self.end_headers()
+            except OSError:
+                pass
 
     def _serve_rosbag_file(self):
         """Serve a file from ROSBAG_DIR by path: /rosbags/<session>/<filename>"""

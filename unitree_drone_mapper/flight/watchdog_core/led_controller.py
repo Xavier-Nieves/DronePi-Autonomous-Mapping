@@ -18,6 +18,7 @@ LED_STATES: tuple[str, ...] = (
     # ── Core system ───────────────────────────────────────────────────────────
     "OFF",
     "SYSTEM_START",
+    "BOOTING",          # NEW — slow green blink during MAVROS wait window
     "IDLE",
     "WAITING_FCU",
     "SCAN_READY",
@@ -37,16 +38,17 @@ LED_STATES: tuple[str, ...] = (
     "WATCHDOG_DEAD",
     "MAIN_DEAD",
     # ── Post-flight pipeline ──────────────────────────────────────────────────
-    "POSTFLIGHT_RUNNING",   # pipeline executing — yellow 1 Hz blink
-    "POSTFLIGHT_DONE",      # pipeline complete  — green + yellow solid (held 5 s)
-    "POSTFLIGHT_FAILED",    # pipeline crashed   — red 3 Hz blink
+    "POSTFLIGHT_RUNNING",
+    "POSTFLIGHT_DONE",
+    "POSTFLIGHT_FAILED",
 )
 
 LED_STATE_DESCRIPTIONS: dict[str, str] = {
-    "OFF":               "All LEDs off",
-    "SYSTEM_START":      "Boot sequence: green → yellow → red cycling",
+    "OFF":               "All LEDs off — watchdog not yet started",
+    "SYSTEM_START":      "Boot sequence: green → yellow → red cycling (first 2.5 s)",
+    "BOOTING":           "Slow green blink 0.5 Hz — MAVROS initialising, up to 60 s",
     "IDLE":              "Green solid — system healthy, awaiting input",
-    "WAITING_FCU":       "Yellow blink 1.5 Hz — waiting for Pixhawk connection",
+    "WAITING_FCU":       "Yellow blink 1.5 Hz — boot complete, Pixhawk not connected",
     "SCAN_READY":        "Green + Yellow solid — system ready, stack not running",
     "SCAN_START":        "Green + Yellow blink 2.5 Hz — stack launch initiated",
     "SCANNING":          "Green blink 1.5 Hz — LiDAR scan in progress",

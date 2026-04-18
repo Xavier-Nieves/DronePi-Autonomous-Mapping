@@ -1,80 +1,72 @@
 """
 camera_capture.py — Continuous IMX477 capture with software waypoint trigger.
 
-Architecture: Option B — persistent Picamera2 instance running in a background
-thread. Waypoint arrival posts an event to the capture thread via threading.Event,
-which saves the current frame immediately from the pre-rolling buffer. ISP
-initialization occurs once at startup, not per capture, eliminating the
-300–500ms per-capture overhead that a subprocess approach (Option A) would incur.
+Architecture: single persistent Picamera2 instance running in a background
+thread. The camera stays open for the full mission duration and continuously
+refreshes an in-memory rolling frame buffer. Two consumers share that buffer:
 
-Design rationale vs. Option A (rpicam-still subprocess):
-    Option A spawns a new process per waypoint. Each spawn re-initialises the
-    ISP pipeline (~300–500ms), making capture latency proportional to the
-    number of waypoints. At 20 waypoints this accumulates 6–10s of dead time
-    during which the drone continues moving, introducing positional error into
-    the photogrammetric reconstruction.
+    1. ROS image stream — a timer on the caller's ROS node publishes the latest
+       frame on /arducam/image_raw at ROS_PUBLISH_FPS for Foxglove and
+       HailoFlightNode. No second camera process is involved.
 
-    Option B holds one Picamera2 instance alive for the entire mission. The ISP
-    is already warm; trigger-to-save latency is bounded by frame period alone
-    (~25ms at 40fps full resolution). Frame metadata (timestamp, GPS, ENU pose)
-    is captured atomically with each frame and written to a sidecar JSON.
+    2. Waypoint trigger — trigger() signals the capture loop to save the current
+       rolling frame to disk as a JPEG + sidecar JSON immediately, without
+       reopening or reconfiguring the camera.
 
-Sensor mode selection:
-    2028×1520 @ 40fps, 12-bit SRGGB — maximum sensor coverage for mapping.
-    The IMX477 does not expose a native 1280×720 mode; libcamera would
-    subsample from 1332×990/120fps, reducing GSD. Full-frame is always
-    preferred for photogrammetry.
+Why one owner matters
+---------------------
+The IMX477 on RPi 5 with libcamera supports exactly one owner process at a
+time. Two processes calling Picamera2() or rpicam-vid simultaneously will
+produce a libcamera resource conflict. By keeping CameraCapture as the sole
+owner and publishing /arducam/image_raw, all other consumers (Hailo, Foxglove)
+subscribe to the ROS topic and receive frames without touching the hardware.
 
-Output layout (per session):
-    /mnt/ssd/maps/<session>/flight_frames/
-        frame_0001.jpg          JPEG, quality 95
-        frame_0001.json         Sidecar: ros_timestamp, timestamp_iso,
-                                ENU pose, GPS, waypoint index
-        frame_0002.jpg
-        frame_0002.json
-        ...
-        capture_log.csv         One row per frame for QA
+Camera configuration choice
+----------------------------
+create_preview_configuration() is used instead of create_still_configuration().
+Preview configuration keeps the ISP pipeline warm and streams continuously at
+the configured rate. Still configuration captures one frame per call at ~300ms
+latency and is not designed for rolling use. buffer_count=4 provides a small
+ring buffer inside libcamera to absorb brief processing spikes.
 
-    Frames are written to flight_frames/ inside the same session directory
-    used by the mesh pipeline (/mnt/ssd/maps/<session>/), so all pipeline
-    outputs for one flight live under a single session root.
+Sensor mode selection
+---------------------
+2028×1520 full-frame at 10fps for mapping quality. The ROS stream is published
+from the same buffer. HailoFlightNode resizes frames internally to its HEF
+input shapes (SCDepthV3: 320×256, YOLOv8m: 640×640) — the full-resolution
+frames are passed through the topic without pre-scaling.
 
-    CHANGE LOG vs previous version:
-        1. FLIGHT_BASE_DIR changed from /mnt/ssd/flights → /mnt/ssd/maps
-           to unify session directories with postprocess_mesh.py output.
-        2. output_dir now resolves to FLIGHT_BASE_DIR/session_id/flight_frames/
-           to isolate frames from mesh outputs in the shared session root.
-        3. ros_timestamp added to sidecar JSON. main.py injects the ROS node
-           clock time via the trigger context dict so frame_ingestor.py can
-           match frames to SLAM poses using PoseInterpolator without relying
-           on wall-clock timestamps.
+Output layout (per session)
+---------------------------
+/mnt/ssd/maps/<session>/flight_frames/
+    frame_0001.jpg          JPEG, quality 95
+    frame_0001.json         Sidecar: ros_timestamp, ENU pose, GPS, waypoint index
+    frame_0002.jpg
+    frame_0002.json
+    ...
+    capture_log.csv         One row per frame for QA
 
-Thread safety:
-    _trigger    threading.Event — main thread sets, capture thread clears
-    _stop       threading.Event — main thread sets to shut down capture loop
-    _frame_lock threading.Lock  — guards _latest_frame and _latest_metadata
-    All public methods are safe to call from main.py's orchestrator thread.
+Thread safety
+-------------
+_trigger    threading.Event — main thread sets, capture loop clears
+_stop       threading.Event — main thread sets to shut down
+_frame_lock threading.Lock  — guards _latest_frame, _latest_meta, _latest_ros_stamp
+All public methods are safe to call from main.py's orchestrator thread.
 
-Dependencies:
-    picamera2   (pre-installed on Ubuntu 24.04 for RPi5, or: pip install picamera2)
-    libcamera   (system package — present after rpicam-apps build)
-    numpy, Pillow (pip install Pillow)
+Usage (from _start_camera in main.py)
+--------------------------------------
+    cam = CameraCapture(
+        session_id="scan_20260416_120000",
+        ros_node=node._node,
+        enable_ros_publish=True,
+    )
+    cam.start()
 
-Usage (from handle_autonomous in main.py):
-    camera = CameraCapture(session_id="scan_20260402_120000")
-    camera.start()
+    # At each waypoint:
+    cam.trigger({"waypoint_index": i, "enu": (ex, ey, ez), "gps": (lat, lon, alt),
+                 "ros_timestamp": node._node.get_clock().now().nanoseconds * 1e-9})
 
-    # At each waypoint arrival:
-    meta = {
-        "waypoint_index": i,
-        "enu":            (ex, ey, ez),
-        "gps":            (lat, lon, alt),
-        "ros_timestamp":  node.get_clock().now().nanoseconds * 1e-9,
-    }
-    path = camera.trigger(meta)
-    log(f"  [CAM] Saved {path}")
-
-    camera.stop()
+    cam.stop()
 """
 
 import csv
@@ -92,16 +84,19 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# CHANGE 1: Unified with postprocess_mesh.py session root.
-# All pipeline outputs for one flight now live under /mnt/ssd/maps/<session>/.
 FLIGHT_BASE_DIR  = Path("/mnt/ssd/maps")
 
-SENSOR_MODE      = {"size": (2028, 1520)}   # Full-frame, max GSD
-FRAMERATE        = 40                        # IMX477 maximum at full resolution
-JPEG_QUALITY     = 95                        # Lossless enough for photogrammetry
-TRIGGER_TIMEOUT  = 2.0                       # Seconds to wait for trigger ack
+SENSOR_MODE      = {"size": (2028, 1520)}   # Full-frame IMX477, max GSD
+FRAMERATE        = 10                        # fps — preview stream rate
+JPEG_QUALITY     = 95
+TRIGGER_TIMEOUT  = 2.0
 CAPTURE_LOG_NAME = "capture_log.csv"
-CSV_HEADERS      = [
+
+# ROS image stream published from the rolling buffer
+ROS_IMAGE_TOPIC  = "/arducam/image_raw"
+ROS_PUBLISH_FPS  = 15.0   # Hz — must be ≤ FRAMERATE; 15Hz feeds Hailo reliably
+
+CSV_HEADERS = [
     "frame_index", "filename", "timestamp_iso",
     "ros_timestamp",
     "waypoint_index",
@@ -119,12 +114,21 @@ class CameraCapture:
     Parameters
     ----------
     session_id : str
-        Unique identifier for this flight session (e.g. 'scan_20260402_120000').
-        Determines the output directory: FLIGHT_BASE_DIR / session_id / flight_frames/
+        Unique identifier for this flight session.
     output_dir : Path or None
-        Override output directory entirely. Defaults to the resolved path above.
+        Override output directory. Defaults to FLIGHT_BASE_DIR/session_id/flight_frames/
     jpeg_quality : int
         JPEG compression quality (1–100). Default 95.
+    ros_node : rclpy.node.Node or None
+        Existing ROS 2 node to attach the image stream publisher to.
+        Pass node._node from MainNode during a real mission.
+    enable_ros_publish : bool
+        If True, publish the rolling frame buffer to /arducam/image_raw.
+        Requires ros_node to be set.
+    ros_publish_topic : str
+        Override the default ROS image topic.
+    ros_publish_fps : float
+        Publish rate for the live stream. Should not exceed FRAMERATE.
     """
 
     def __init__(
@@ -132,44 +136,65 @@ class CameraCapture:
         session_id: str,
         output_dir: Optional[Path] = None,
         jpeg_quality: int = JPEG_QUALITY,
+        ros_node=None,
+        enable_ros_publish: bool = False,
+        ros_publish_topic: str = ROS_IMAGE_TOPIC,
+        ros_publish_fps: float = ROS_PUBLISH_FPS,
     ):
-        self.session_id   = session_id
-        # CHANGE 2: Frames live in flight_frames/ subfolder inside the session dir.
-        # This isolates JPEGs and sidecars from PLY mesh outputs in the same root.
-        self.output_dir   = (
+        self.session_id  = session_id
+        self.output_dir  = (
             Path(output_dir) if output_dir
             else FLIGHT_BASE_DIR / session_id / "flight_frames"
         )
         self.jpeg_quality = jpeg_quality
 
-        self._camera      = None          # Picamera2 instance
-        self._thread      = None          # Background capture thread
-        self._trigger     = threading.Event()
-        self._stop        = threading.Event()
-        self._frame_lock  = threading.Lock()
-        self._latest_frame    = None      # numpy array (H, W, 3) RGB
-        self._latest_meta     = {}        # Picamera2 frame metadata dict
-        self._pending_context = {}        # dict posted by trigger() for sidecar
-        self._frame_index     = 0
-        self._csv_file        = None
-        self._csv_writer      = None
-        self._started         = False
+        # Picamera2 instance and capture thread
+        self._camera     = None
+        self._thread     = None
+        self._trigger    = threading.Event()
+        self._stop       = threading.Event()
+        self._frame_lock = threading.Lock()
+
+        # Rolling frame buffer — updated on every frame in _capture_loop
+        self._latest_frame     = None   # numpy array (H, W, 3) RGB
+        self._latest_meta      = {}     # Picamera2 metadata dict
+        self._latest_ros_stamp = None   # _Stamp(sec, nanosec) or None
+        self._live_frame_count = 0      # total frames captured (not saved)
+
+        # Trigger state
+        self._pending_context  = {}
+        self._last_saved_path  = None
+        self._ack              = None
+        self._frame_index      = 0      # saved frame count
+
+        # CSV log
+        self._csv_file   = None
+        self._csv_writer = None
+        self._started    = False
+
+        # ROS publisher (optional — attached to caller's node)
+        self._ros_node           = ros_node
+        self._enable_ros_publish = enable_ros_publish
+        self._ros_publish_topic  = ros_publish_topic
+        self._ros_publish_fps    = ros_publish_fps
+        self._ros_pub            = None
+        self._ros_timer          = None
+        self._ros_image_type     = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> bool:
         """
-        Initialise Picamera2 and start the background capture thread.
+        Initialise Picamera2 and start the rolling capture thread.
 
-        Returns True on success, False if Picamera2 is unavailable (e.g.
-        running on a development machine without a camera).
+        Returns True on success, False if Picamera2 is unavailable.
+        Camera failure is non-fatal — main.py continues without captures.
         """
         try:
             from picamera2 import Picamera2
         except ImportError:
             logger.warning(
-                "[CameraCapture] picamera2 not installed — camera disabled. "
-                "Install with: pip install picamera2"
+                "[CameraCapture] picamera2 not importable — camera disabled."
             )
             return False
 
@@ -178,26 +203,27 @@ class CameraCapture:
 
         self._camera = Picamera2()
 
-        # Configure for maximum-GSD full-frame mapping
-        config = self._camera.create_still_configuration(
+        # Preview configuration for continuous streaming.
+        # buffer_count=4 gives libcamera a small ring buffer to absorb
+        # processing spikes without dropping frames.
+        config = self._camera.create_preview_configuration(
             main={"size": SENSOR_MODE["size"], "format": "RGB888"},
             controls={
-                "FrameRate":      FRAMERATE,
-                "AwbEnable":      True,
-                "AeEnable":       True,
-                "NoiseReductionMode": 2,   # HighQuality
+                "FrameRate": FRAMERATE,
+                "AwbEnable": True,
+                "AeEnable":  True,
             },
+            buffer_count=4,
         )
         self._camera.configure(config)
         self._camera.start()
 
-        # Allow AEC/AWB to converge before the first capture
+        # Allow AEC/AWB to converge before mission capture begins
         time.sleep(1.5)
-        logger.info(
-            f"[CameraCapture] IMX477 started — "
-            f"{SENSOR_MODE['size'][0]}×{SENSOR_MODE['size'][1]} "
-            f"@ {FRAMERATE}fps  output={self.output_dir}"
-        )
+
+        # Attach ROS publisher to the caller's node if requested
+        if self._enable_ros_publish and self._ros_node is not None:
+            self._attach_ros_publisher()
 
         self._stop.clear()
         self._trigger.clear()
@@ -206,64 +232,84 @@ class CameraCapture:
         )
         self._thread.start()
         self._started = True
+
+        logger.info(
+            f"[CameraCapture] IMX477 started — "
+            f"{SENSOR_MODE['size'][0]}×{SENSOR_MODE['size'][1]} "
+            f"@ {FRAMERATE}fps  output={self.output_dir}"
+        )
+        if self._ros_pub is not None:
+            logger.info(
+                f"[CameraCapture] ROS stream enabled — "
+                f"topic={self._ros_publish_topic} @ {self._ros_publish_fps:.0f}Hz"
+            )
         return True
 
     def stop(self) -> None:
-        """Stop the capture thread and release camera resources."""
+        """Stop the capture thread and release all camera resources."""
         if not self._started:
             return
+
         self._stop.set()
-        self._trigger.set()   # Unblock the capture loop if waiting
+        self._trigger.set()   # unblock any blocked wait path
+
         if self._thread:
             self._thread.join(timeout=5.0)
+
         if self._camera:
             try:
                 self._camera.stop()
                 self._camera.close()
             except Exception as exc:
                 logger.warning(f"[CameraCapture] Error closing camera: {exc}")
+
         if self._csv_file:
             self._csv_file.close()
+
         self._started = False
         logger.info(
-            f"[CameraCapture] Stopped — {self._frame_index} frames captured "
-            f"to {self.output_dir}"
+            f"[CameraCapture] Stopped — "
+            f"saved={self._frame_index}  "
+            f"live_frames={self._live_frame_count}  "
+            f"output={self.output_dir}"
         )
 
-    # ── Public Trigger API ────────────────────────────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────────
 
-    def trigger(self, context: dict = None, timeout: float = TRIGGER_TIMEOUT) -> Optional[Path]:
+    def trigger(
+        self, context: dict = None, timeout: float = TRIGGER_TIMEOUT
+    ) -> Optional[Path]:
         """
-        Signal the capture thread to save the current frame.
+        Save the current rolling frame to disk.
 
-        Posts `context` as the sidecar metadata. The `ros_timestamp` key,
-        if present, is written to the sidecar JSON so frame_ingestor.py
-        can match frames to SLAM poses via PoseInterpolator.
+        The capture loop runs continuously. When trigger() is called it sets
+        a flag that the loop checks on its next iteration — the current live
+        frame is saved immediately without reopening or reconfiguring the camera.
 
         Parameters
         ----------
         context : dict
-            Metadata attached to this capture. Recommended keys:
+            Metadata attached to this capture. Keys used:
                 waypoint_index : int
-                enu            : (x, y, z) tuple in metres
-                gps            : (lat, lon, alt) tuple
-                ros_timestamp  : float — ROS clock time in seconds
-                                 (node.get_clock().now().nanoseconds * 1e-9)
+                enu            : (x, y, z) metres — SLAM position
+                gps            : (lat, lon, alt)
+                ros_timestamp  : float — ROS clock seconds
+                gps_quality    : dict with hdop, satellites, reliable, source
         timeout : float
-            Maximum seconds to wait for the capture thread to acknowledge.
+            Maximum seconds to wait for the capture loop to acknowledge.
 
         Returns
         -------
-        Path to saved JPEG, or None if camera is not running or timeout.
+        Path to the saved JPEG, or None on timeout or if camera is not running.
         """
         if not self._started:
             return None
 
         with self._frame_lock:
             self._pending_context = context or {}
+
         self._last_saved_path = None
         self._ack = threading.Event()
-
         self._trigger.set()
 
         if not self._ack.wait(timeout=timeout):
@@ -272,43 +318,163 @@ class CameraCapture:
 
         return self._last_saved_path
 
+    def get_latest_frame(self):
+        """
+        Return a copy of the latest rolling frame and its metadata.
+
+        Returns
+        -------
+        (frame, meta, stamp) where:
+            frame : numpy array (H, W, 3) RGB, or None if not yet available
+            meta  : dict of Picamera2 metadata (ExposureTime, AnalogueGain, etc.)
+            stamp : _Stamp(sec, nanosec) from FrameWallClock, or None
+        """
+        with self._frame_lock:
+            if self._latest_frame is None:
+                return None, {}, None
+            return (
+                self._latest_frame.copy(),
+                dict(self._latest_meta),
+                self._latest_ros_stamp,
+            )
+
+    # ── ROS Publishing ────────────────────────────────────────────────────────
+
+    def _attach_ros_publisher(self) -> None:
+        """
+        Create a publisher and a timer on the caller's ROS node.
+
+        The timer fires at ros_publish_fps and calls _publish_latest_frame(),
+        which copies the current rolling buffer and publishes it as
+        sensor_msgs/Image (rgb8). The publisher runs on the caller's executor —
+        no separate ROS node or thread is created here.
+        """
+        try:
+            from rclpy.qos import (
+                QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+            )
+            from sensor_msgs.msg import Image
+        except ImportError as exc:
+            logger.warning(f"[CameraCapture] ROS publisher disabled: {exc}")
+            return
+
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self._ros_image_type = Image
+        self._ros_pub = self._ros_node.create_publisher(
+            Image, self._ros_publish_topic, sensor_qos
+        )
+        period = 1.0 / float(self._ros_publish_fps) if self._ros_publish_fps > 0 else 1.0
+        self._ros_timer = self._ros_node.create_timer(period, self._publish_latest_frame)
+
+    def _publish_latest_frame(self) -> None:
+        """
+        Publish the latest rolling frame as sensor_msgs/Image (rgb8).
+
+        Frame is downscaled to 640x480 before publishing. The full-resolution
+        2028x1520 frame = 9 MB per message which exceeds the Fast-DDS default
+        fragment reassembly buffer (~1 MB) and is silently dropped between
+        processes. 640x480 = 0.9 MB fits in a single DDS fragment and is
+        received reliably by hailo_flight_node. Waypoint JPEGs are saved from
+        the full-resolution buffer in _capture_loop and are unaffected.
+        Hailo inference classes resize internally to their HEF input shapes
+        (SCDepthV3: 320x256, YOLOv8m: 640x640) so 640x480 is sufficient.
+        """
+        if self._ros_pub is None or self._ros_image_type is None:
+            return
+
+        frame, _meta, ros_stamp = self.get_latest_frame()
+        if frame is None:
+            return
+
+        import cv2
+        publish_frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_LINEAR)
+
+        h, w = publish_frame.shape[:2]
+        msg = self._ros_image_type()
+        msg.header.frame_id = "camera_optical"
+
+        if ros_stamp is not None:
+            msg.header.stamp.sec     = ros_stamp.sec
+            msg.header.stamp.nanosec = ros_stamp.nanosec
+        else:
+            msg.header.stamp = self._ros_node.get_clock().now().to_msg()
+
+        msg.height       = h
+        msg.width        = w
+        msg.encoding     = "rgb8"
+        msg.is_bigendian = False
+        msg.step         = w * 3
+        msg.data         = publish_frame.tobytes()
+        self._ros_pub.publish(msg)
+
     # ── Background Capture Loop ───────────────────────────────────────────────
 
     def _capture_loop(self) -> None:
         """
-        Background thread: continuously captures frames into a rolling buffer
-        and saves to disk when trigger() posts an event.
+        Continuously grab frames from Picamera2 and refresh the rolling buffer.
 
-        The loop polls the camera at FRAMERATE; each iteration updates
-        `_latest_frame`. When `_trigger` is set, the current frame is saved
-        synchronously and the trigger is cleared.
+        This is the critical difference from the old implementation. The loop
+        runs unconditionally — it does not wait for trigger(). Every frame
+        updates _latest_frame so the ROS publisher always has fresh data.
+
+        When _trigger is set by trigger(), the current frame is saved to disk
+        on the next iteration and the trigger is cleared. The ack event is set
+        so trigger() can return the saved path.
+
+        Picamera2 API used here:
+            capture_request() — acquires the next available frame from the
+                                 libcamera buffer without blocking indefinitely.
+            request.make_array("main") — extracts the frame as a numpy array.
+            request.get_metadata() — returns per-frame ISP metadata.
+            request.release() — returns the buffer to libcamera immediately.
         """
         while not self._stop.is_set():
-            self._trigger.wait()
-            if self._stop.is_set():
-                break
-            self._trigger.clear()
-
-            t_trigger = time.monotonic()
-
             try:
-                frame    = self._camera.capture_array("main")
-                cam_meta = self._camera.capture_metadata()
+                request  = self._camera.capture_request()
+                frame    = request.make_array("main")
+                cam_meta = request.get_metadata()
+                request.release()
             except Exception as exc:
                 logger.error(f"[CameraCapture] Capture failed: {exc}")
-                if hasattr(self, "_ack"):
-                    self._ack.set()
+                time.sleep(0.1)
                 continue
 
+            ros_stamp = _ros_stamp_from_frame_wall_clock(cam_meta)
+
+            # Update the rolling buffer under lock
             with self._frame_lock:
-                context = dict(self._pending_context)
+                self._latest_frame     = np.ascontiguousarray(frame.copy())
+                self._latest_meta      = dict(cam_meta)
+                self._latest_ros_stamp = ros_stamp
+                self._live_frame_count += 1
 
+                do_save = self._trigger.is_set()
+                if do_save:
+                    context       = dict(self._pending_context)
+                    frame_to_save = self._latest_frame.copy()
+                    meta_to_save  = dict(self._latest_meta)
+
+            if not do_save:
+                continue
+
+            # Save triggered frame outside the lock
+            self._trigger.clear()
+            t_trigger = time.monotonic()
             self._frame_index += 1
-            saved_path = self._save_frame(frame, cam_meta, context, t_trigger)
-            self._last_saved_path = saved_path
-
-            if hasattr(self, "_ack"):
-                self._ack.set()
+            try:
+                saved = self._save_frame(frame_to_save, meta_to_save, context, t_trigger)
+                self._last_saved_path = saved
+            except Exception as exc:
+                logger.error(f"[CameraCapture] Save failed: {exc}")
+                self._last_saved_path = None
+            finally:
+                if self._ack is not None:
+                    self._ack.set()
 
     # ── File I/O ──────────────────────────────────────────────────────────────
 
@@ -331,7 +497,6 @@ class CameraCapture:
         gps    = context.get("gps",  (None, None, None))
         ros_ts = context.get("ros_timestamp", None)
 
-        # ── JPEG with GPS EXIF ────────────────────────────────────────────────
         # _build_gps_exif returns b"" gracefully if piexif is absent or GPS is
         # None — the plain JPEG is written instead and flagged in the sidecar.
         exif_bytes   = _build_gps_exif(gps[0], gps[1], gps[2])
@@ -348,17 +513,16 @@ class CameraCapture:
         from datetime import timezone as _tz
         ts_iso = datetime.now(tz=_tz.utc).isoformat()
 
-        # ── Sidecar JSON ──────────────────────────────────────────────────────
         sidecar = {
             "frame_index":      idx,
             "filename":         filename,
-            "timestamp_iso":    ts_iso,         # wall clock — human readable
-            "ros_timestamp":    ros_ts,          # ROS clock — SLAM pose matching
+            "timestamp_iso":    ts_iso,
+            "ros_timestamp":    ros_ts,
             "waypoint_index":   context.get("waypoint_index"),
             "enu":              {"x": enu[0], "y": enu[1], "z": enu[2]},
             "gps":              {"lat": gps[0], "lon": gps[1], "alt": gps[2]},
             "gps_quality":      context.get("gps_quality", {}),
-            "exif_gps_written": exif_written,   # QA flag for frame_ingestor
+            "exif_gps_written": exif_written,
             "latency_ms":       round(latency_ms, 2),
             "sensor_mode":      f"{SENSOR_MODE['size'][0]}x{SENSOR_MODE['size'][1]}",
             "framerate":        FRAMERATE,
@@ -413,7 +577,31 @@ class CameraCapture:
         self.stop()
 
 
-# ── EXIF GPS helper (appended at module level) ────────────────────────────────
+# ── Helper functions ──────────────────────────────────────────────────────────
+
+def _ros_stamp_from_frame_wall_clock(cam_meta: dict):
+    """
+    Convert Picamera2 FrameWallClock nanoseconds to a lightweight stamp object.
+
+    FrameWallClock is the wall-clock time in nanoseconds at which the frame
+    was captured by the ISP. It is more accurate than time.time() taken after
+    capture_request() returns because it avoids the libcamera processing delay.
+
+    Returns a _Stamp(sec, nanosec) compatible with sensor_msgs/Image header,
+    or None if FrameWallClock is not in the metadata.
+    """
+    ns = cam_meta.get("FrameWallClock")
+    if ns is None:
+        return None
+
+    class _Stamp:
+        __slots__ = ("sec", "nanosec")
+        def __init__(self, sec, nanosec):
+            self.sec     = sec
+            self.nanosec = nanosec
+
+    return _Stamp(int(ns // 1_000_000_000), int(ns % 1_000_000_000))
+
 
 def _build_gps_exif(lat, lon, alt):
     """

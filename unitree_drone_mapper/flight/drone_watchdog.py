@@ -7,6 +7,16 @@ Changes from previous version
   PostflightBuzzerDriver fires stage-transition tones promptly as
   postprocess_mesh.py advances through its pipeline stages.
 
+  BOOTING state added: watchdog now writes booting_complete=False in the
+  status JSON during the MAVROS wait window. led_service.py uses this to
+  show the BOOTING pattern (slow green pulse) instead of WAITING_FCU during
+  startup, so the user can distinguish "system still initialising" from
+  "Pixhawk genuinely not connected after boot completed".
+
+  booting_complete transitions False → True exactly once: when
+  _wait_for_mavros() returns (either FCU connected, or 60s timeout).
+  After that transition it stays True for the lifetime of the process.
+
 All fixes from the LED repair pass (A, C, D, H, I) are preserved here.
 """
 
@@ -58,30 +68,32 @@ MISSION_LOCK = Path("/tmp/dronepi_mission.lock")
 
 
 def _write_status(
-    fcu:            bool  = False,
-    armed:          bool  = False,
-    processing:     bool  = False,
-    stack_running:  bool  = False,
-    led_state:      str   = "",
-    led_until:      float = 0.0,
-    warning:        bool  = False,
-    error:          bool  = False,
-    critical:       bool  = False,
-    system_failure: bool  = False,
+    fcu:               bool  = False,
+    armed:             bool  = False,
+    processing:        bool  = False,
+    stack_running:     bool  = False,
+    led_state:         str   = "",
+    led_until:         float = 0.0,
+    warning:           bool  = False,
+    error:             bool  = False,
+    critical:          bool  = False,
+    system_failure:    bool  = False,
+    booting_complete:  bool  = False,
 ) -> None:
     try:
         payload = json.dumps({
-            "ts":             time.time(),
-            "fcu":            fcu,
-            "armed":          armed,
-            "processing":     processing,
-            "stack_running":  stack_running,
-            "led_state":      led_state,
-            "led_until":      led_until,
-            "warning":        warning,
-            "error":          error,
-            "critical":       critical,
-            "system_failure": system_failure,
+            "ts":               time.time(),
+            "fcu":              fcu,
+            "armed":            armed,
+            "processing":       processing,
+            "stack_running":    stack_running,
+            "led_state":        led_state,
+            "led_until":        led_until,
+            "warning":          warning,
+            "error":            error,
+            "critical":         critical,
+            "system_failure":   system_failure,
+            "booting_complete": booting_complete,
         })
         with open(_WATCHDOG_STATUS_FILE_TMP, "w") as f:
             f.write(payload)
@@ -120,13 +132,19 @@ def _play_tune(reader: MavrosReader, tune: str, label: str = "") -> None:
 
 
 def _wait_for_mavros(reader: MavrosReader) -> bool:
+    """Wait up to MAVROS_WAIT_S for FCU connection.
+
+    Writes booting_complete=False on every poll cycle so led_service.py
+    shows BOOTING (green slow blink) instead of WAITING_FCU during this
+    window. booting_complete transitions to True in main() after return.
+    """
     log(f"Waiting for MAVROS connection (up to {MAVROS_WAIT_S}s)...")
     deadline = time.time() + MAVROS_WAIT_S
     while time.time() < deadline:
         if reader.connected:
             log(f"FCU connected. Mode: {reader.mode} Armed: {reader.armed}")
             return True
-        _write_status(fcu=False, armed=reader.armed)
+        _write_status(fcu=False, armed=reader.armed, booting_complete=False)
         time.sleep(1.0)
     log("[WARN] FCU not connected — continuing anyway")
     return False
@@ -140,6 +158,15 @@ def main() -> None:
     log("=" * 60)
 
     ROSBAG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Clear stale postflight IPC file from previous session/crash so the LED
+    # service does not show POSTFLIGHT_FAILED on boot.
+    try:
+        Path("/tmp/postflight_status.json").unlink(missing_ok=True)
+        Path("/tmp/postflight_status.json.tmp").unlink(missing_ok=True)
+        log("[INIT] Cleared stale postflight_status.json")
+    except Exception as _e:
+        log(f"[INIT] Could not clear postflight IPC file: {_e}")
 
     try:
         reader = MavrosReader()
@@ -163,18 +190,22 @@ def main() -> None:
     fault_critical       = False
     fault_system_failure = False
 
-    # Hold SYSTEM_START long enough for the LED poll cycle to observe it (Fix A).
+    # SYSTEM_START animation — booting_complete=False, still in boot phase (Fix A).
     _write_status(
         fcu=False, armed=False,
         led_state="SYSTEM_START",
         led_until=time.time() + _MIN_TRANSIENT_S,
+        booting_complete=False,
     )
     _play_tune(reader, TUNE_SYSTEM_START, "system_start")
     time.sleep(_MIN_TRANSIENT_S)
 
+    # MAVROS wait — led_service shows BOOTING during this entire window.
     fcu_ok = _wait_for_mavros(reader)
 
-    # Write SCAN_READY immediately and hold it before the loop starts (Fix I).
+    # Boot sequence complete. All subsequent writes use booting_complete=True.
+    log("[INIT] Boot sequence complete — booting_complete=True")
+
     led_state = ""
     led_until = 0.0
     if fcu_ok:
@@ -186,10 +217,17 @@ def main() -> None:
             armed=reader.armed,
             led_state=led_state,
             led_until=led_until,
+            booting_complete=True,
         )
     else:
         fault_warning = True
         alarms.set_warning(True)
+        _write_status(
+            fcu=False,
+            armed=reader.armed,
+            warning=True,
+            booting_complete=True,
+        )
 
     postflight = PostflightMonitor(reader)
     stack      = FlightStack(reader, postflight_fn=postflight.trigger)
@@ -199,9 +237,6 @@ def main() -> None:
         signal.signal(signal.SIGINT,  _handle_shutdown)
 
         while not _shutdown.is_set():
-            # Advance post-flight stage buzzer on every cycle.
-            # poll() reads /tmp/postflight_status.json and fires stage tones
-            # when postprocess_mesh.py advances — no-op if no pipeline is running.
             postflight.poll()
 
             lock_mode = read_lock_mode()
@@ -209,6 +244,11 @@ def main() -> None:
             fault_critical       = bool(stack.is_running and reader.armed and not reader.connected)
             fault_error          = False
             fault_system_failure = False
+
+            # Clear warning when system returns to healthy idle
+            if reader.connected and not stack.is_running and not reader.armed:
+                fault_warning = False
+                alarms.set_warning(False)
 
             alarms.set_error(fault_error)
             alarms.set_critical(fault_critical)
@@ -228,6 +268,7 @@ def main() -> None:
                     led_state=led_state, led_until=led_until,
                     warning=fault_warning, error=fault_error,
                     critical=fault_critical, system_failure=fault_system_failure,
+                    booting_complete=True,
                 )
                 time.sleep(1.0 / POLL_HZ)
                 continue
@@ -246,6 +287,7 @@ def main() -> None:
                     led_state=led_state, led_until=led_until,
                     warning=fault_warning, error=fault_error,
                     critical=fault_critical, system_failure=fault_system_failure,
+                    booting_complete=True,
                 )
                 time.sleep(1.0 / POLL_HZ)
                 continue
@@ -265,6 +307,7 @@ def main() -> None:
                             processing=postflight.is_active, stack_running=False,
                             warning=fault_warning, error=True,
                             critical=fault_critical, system_failure=fault_system_failure,
+                            booting_complete=True,
                         )
                         time.sleep(1.0 / POLL_HZ)
                         continue
@@ -293,6 +336,7 @@ def main() -> None:
                     led_state=led_state, led_until=led_until,
                     warning=fault_warning, error=fault_error,
                     critical=fault_critical, system_failure=fault_system_failure,
+                    booting_complete=True,
                 )
                 time.sleep(1.0 / MONITOR_HZ)
                 continue
@@ -306,7 +350,6 @@ def main() -> None:
                     led_until = time.time() + _MIN_TRANSIENT_S
                     ok = stack.start("MANUAL_RC")
                     if ok:
-                        # Use TUNE_SCAN_START for action-initiated (Fix H)
                         _play_tune(reader, TUNE_SCAN_START, "scan_start")
                         led_state = "SCAN_START"
                         led_until = time.time() + _MIN_TRANSIENT_S
@@ -321,6 +364,7 @@ def main() -> None:
                     led_state=led_state, led_until=led_until,
                     warning=fault_warning, error=fault_error,
                     critical=fault_critical, system_failure=fault_system_failure,
+                    booting_complete=True,
                 )
                 time.sleep(1.0 / POLL_HZ)
 
@@ -340,6 +384,7 @@ def main() -> None:
                     led_state=led_state, led_until=led_until,
                     warning=fault_warning, error=fault_error,
                     critical=fault_critical, system_failure=fault_system_failure,
+                    booting_complete=True,
                 )
                 time.sleep(1.0 / MONITOR_HZ)
 
@@ -348,7 +393,7 @@ def main() -> None:
         raise
     finally:
         scan_beeper.stop()
-        postflight.poll()   # flush any pending stage tone before shutdown
+        postflight.poll()
         alarms.shutdown()
         if stack.is_running:
             stack.stop()

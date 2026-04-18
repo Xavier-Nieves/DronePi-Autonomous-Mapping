@@ -1,0 +1,31 @@
+[Unit]
+Description=DronePi Camera Stream Server (MJPEG, port 8081)
+# Start after network is up. Does NOT depend on mavros or drone-watchdog —
+# the stream server is useful independently of any flight stack.
+After=network.target
+# Must stop before any flight that uses CameraCapture (main.py), because
+# only one process can hold the IMX477 at a time. drone-watchdog stops
+# this service before arming via the pre-arm hook (TODO: add that hook).
+# For now, stop manually before flight: sudo systemctl stop camera-stream
+
+[Service]
+Type=simple
+User=dronepi
+
+# Use the dronepi conda environment where picamera2 and Pillow are installed.
+# /usr/bin/python3 (system Python) does NOT have picamera2.
+ExecStart=/home/dronepi/miniforge3/envs/dronepi/bin/python3 \
+    /home/dronepi/unitree_lidar_project/rpi_server/camera_stream_server.py
+
+Restart=on-failure
+RestartSec=5
+
+# Give Picamera2 time to release the ISP on restart
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camera-stream
+
+[Install]
+WantedBy=multi-user.target

@@ -30,8 +30,8 @@ from .logging_utils import log
 
 # These paths/commands may need to match your project exactly.
 # They are kept generic here to preserve the structure of the original file.
-PROJECT_ROOT = Path.home() / "unitree_lidar_project"
-ROSBAG_DIR = PROJECT_ROOT / "bags"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ROSBAG_DIR   = Path("/mnt/ssd/rosbags")
 
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
 WS_SETUP = str(PROJECT_ROOT / "RPI5/ros2_ws/install/setup.bash")

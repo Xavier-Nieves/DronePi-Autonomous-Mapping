@@ -666,30 +666,80 @@
   }
   #live-tab-content.active { display: flex; }
 
-  /* Foxglove iframe pane */
-  #foxglove-pane {
-    flex: 1;
+  /* Camera feed pane (left 60%) */
+  #camera-pane {
+    flex: 3;
     position: relative;
     overflow: hidden;
     border-right: 1px solid #1e2a3a;
+    background: #060810;
+    display: flex;
+    flex-direction: column;
   }
-  #foxglove-pane iframe { width:100%; height:100%; border:none; background:#0e1218; }
 
-  /* Foxglove connecting overlay */
-  #fg-overlay {
+  /* Camera header bar */
+  #camera-header {
+    height: 34px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid #1e2a3a;
+    flex-shrink: 0;
+  }
+  #camera-header .cam-title {
+    font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: #2a4a6a;
+  }
+  #cam-status-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #2a3a50; flex-shrink: 0;
+    transition: background 0.4s;
+  }
+  #cam-status-dot.live { background: #4adf8a; box-shadow: 0 0 6px #4adf8a88; }
+  #cam-status-dot.error { background: #df4a4a; }
+  #cam-url-input {
+    flex: 1; font-family: 'Courier New', monospace; font-size: 10px;
+    padding: 3px 7px; background: #0e1218; border: 1px solid #1e2a3a;
+    color: #7a8fa8; border-radius: 3px; letter-spacing: 0.5px;
+  }
+  #cam-url-input:focus { outline: none; border-color: #4a9eff; color: #c0cfe0; }
+
+  /* Camera image container */
+  #camera-view {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+  #cam-img {
+    max-width: 100%; max-height: 100%;
+    object-fit: contain;
+    display: block;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #cam-img.loaded { opacity: 1; }
+  #cam-placeholder {
     position: absolute; inset: 0;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    gap: 14px; background: #0a0c10;
-    z-index: 10; transition: opacity 0.5s;
+    gap: 14px;
   }
-  #fg-overlay.hidden { opacity:0; pointer-events:none; }
-  #fg-conn-status { font-size:11px; color:#4a6a8a; letter-spacing:2px; text-transform:uppercase; }
-  #fg-conn-url { font-size:9px; color:#2a4a6a; letter-spacing:1px; }
+  #cam-placeholder.hidden { display: none; }
+  .cam-icon { font-size: 48px; opacity: 0.15; }
+  .cam-no-feed { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #2a4a6a; }
+  .cam-no-sub  { font-size: 9px; color: #1e3050; letter-spacing: 1px; }
+
+  /* Foxglove overlay (kept hidden, no longer shown) */
+  #fg-overlay { display: none; }
 
   /* Right telemetry panel */
   #live-panel {
-    width: 300px; min-width: 260px;
+    flex: 2;
+    min-width: 280px;
+    max-width: 480px;
     display: flex; flex-direction: column;
     overflow: hidden; background: #0a0e14;
   }
@@ -817,9 +867,9 @@
   
   <div class="divider"></div>
   
-  <span id="flight-label"><span id="info-flight">—</span> <span id="info-points"></span></span>
+  <span id="flight-label"><span id="info-flight">-</span> <span id="info-points"></span></span>
   
-  <button class="hbtn" id="flights-btn" title="Flight database">Flights ☰</button>
+  <button class="hbtn" id="flights-btn" title="Flight database">Flights DB</button>
   
   <div id="status-pill" class="ready">READY</div>
 </div>
@@ -921,63 +971,52 @@
 ═══════════════════════════════════════════════════════════════ -->
 <div id="live-tab-content">
 
-  <!-- Left: Foxglove launcher panel -->
-  <div id="foxglove-pane">
-    <div id="fg-overlay">
-      <div class="pulse-ring"><div class="drone-icon">📡</div></div>
-      <div id="fg-conn-status">Waiting for bridge</div>
-      <div id="fg-conn-url">Enter WebSocket address and click Connect</div>
-    </div>
-    <!-- Foxglove launch panel — shown after connect -->
-    <div id="fg-launch-panel" style="
-      display:none;
-      flex-direction:column;
-      align-items:center;
-      justify-content:center;
-      height:100%;
-      gap:20px;
-      background:#0a0c10;
-      padding:32px;
-    ">
-      <div style="font-size:32px;">📡</div>
-      <div style="font-size:13px;color:#4a9eff;letter-spacing:2px;text-transform:uppercase;">
-        Bridge Connected
-      </div>
-      <div style="font-size:10px;color:#3a5a7a;letter-spacing:1px;text-align:center;max-width:300px;line-height:1.8;">
-        Your telemetry panel on the right is receiving live data.<br>
-        Open Foxglove Studio in a new tab for full visualization.
-      </div>
-      <button id="fg-open-btn" onclick="openFoxgloveTab()" style="
-        font-family:'Courier New',monospace;
-        font-size:11px;
-        letter-spacing:1.5px;
-        padding:12px 24px;
-        background:rgba(74,158,255,0.12);
-        border:1px solid #4a9eff;
-        color:#4a9eff;
-        cursor:pointer;
-        text-transform:uppercase;
+  <!-- Left: Camera feed pane (60%) -->
+  <div id="camera-pane">
+    <!-- Header bar with URL input -->
+    <div id="camera-header">
+      <span id="cam-status-dot"></span>
+      <span class="cam-title">Camera Feed</span>
+      <input type="text" id="cam-url-input" placeholder="http://10.42.0.1:8081/stream" spellcheck="false">
+      <button onclick="setCamUrl()" style="
+        font-family:'Courier New',monospace; font-size:9px; letter-spacing:1px;
+        padding:3px 8px; background:transparent; border:1px solid #2a3a50;
+        color:#4a6a8a; cursor:pointer; text-transform:uppercase; white-space:nowrap;
         transition:all 0.2s;
-        border-radius:3px;
-      ">⬡ Open Foxglove Studio ↗</button>
-      <div style="font-size:9px;color:#2a4a6a;letter-spacing:0.5px;text-align:center;">
-        Opens in a new tab · auto-connects to your bridge
-      </div>
-      <!-- Note for future HTTPS implementation -->
-      <!-- TODO: When HTTPS is added to serve.py, replace this launcher with
-           the embedded iframe approach using app.foxglove.dev deep-link.
-           The iframe src would be:
-           https://app.foxglove.dev/?ds=foxglove-websocket&ds.url=wss://[RPI_IP]:8765
-           Mixed content blocked on HTTP — requires HTTPS on serve.py first. -->
+      " onmouseover="this.style.borderColor='#4a9eff';this.style.color='#4a9eff'"
+         onmouseout="this.style.borderColor='#2a3a50';this.style.color='#4a6a8a'">Set</button>
+      <!-- Foxglove Studio link — kept accessible via button -->
+      <button id="fg-open-btn" onclick="openFoxgloveTab()" style="
+        font-family:'Courier New',monospace; font-size:9px; letter-spacing:1px;
+        padding:3px 10px; background:transparent; border:1px solid #2a3a50;
+        color:#4a6a8a; cursor:pointer; text-transform:uppercase; white-space:nowrap;
+        transition:all 0.2s;
+      " title="Open Foxglove Studio in new tab"
+         onmouseover="this.style.borderColor='#4a9eff';this.style.color='#4a9eff'"
+         onmouseout="this.style.borderColor='#2a3a50';this.style.color='#4a6a8a'">Foxglove &#x2197;</button>
     </div>
-  </div>
+
+    <!-- Feed / placeholder -->
+    <div id="camera-view">
+      <img id="cam-img" alt="Camera feed">
+      <div id="cam-placeholder">
+        <div class="cam-icon">&#x1F4F7;</div>
+        <div class="cam-no-feed">No Camera Feed</div>
+        <div class="cam-no-sub" id="cam-placeholder-sub">Connect and set stream URL above</div>
+      </div>
+    </div>
+
+    <!-- Hidden fg-overlay stub so JS refs don't break -->
+    <div id="fg-overlay">
+    </div><!-- /fg-overlay stub -->
+  </div><!-- /camera-pane -->
 
   <!-- Right: Telemetry + controls panel -->
   <div id="live-panel">
 
     <!-- Connection bar -->
     <div id="conn-bar">
-      <input type="text" id="fg-ws-input" value="" placeholder="ws://RPI_IP:9001" spellcheck="false">
+      <input type="text" id="fg-ws-input" value="" placeholder="ws://10.42.0.1:9001" spellcheck="false">
       <button id="conn-btn" onclick="connectFoxglove()">Connect</button>
     </div>
 
@@ -2313,9 +2352,10 @@ function switchTab(tab) {
   if (tab === 'live') {
     liveContent.classList.add('active');
     liveStatsBar.style.display = 'flex';
-    // Auto-connect if input has value and not yet connected
-    if (!fgConnected && document.getElementById('fg-ws-input').value) {
-      connectFoxglove();
+    // Reconnect if the WS dropped while on the 3D viewer tab
+    if (!fgConnected) {
+      const wsUrl = document.getElementById('fg-ws-input').value;
+      if (wsUrl) connectTelemetryWs(wsUrl);
     }
   } else {
     liveContent.classList.remove('active');
@@ -2344,11 +2384,6 @@ function connectFoxglove() {
   const wsUrl = document.getElementById('fg-ws-input').value.trim();
   if (!wsUrl) return;
   fgWsUrl = wsUrl;
-
-  // ── Show launcher panel ───────────────────────────────────────────────────
-  document.getElementById('fg-overlay').classList.add('hidden');
-  const launchPanel = document.getElementById('fg-launch-panel');
-  launchPanel.style.display = 'flex';
 
   // ── Connect WebSocket for telemetry panel ─────────────────────────────────
   connectTelemetryWs(wsUrl);
@@ -2462,6 +2497,12 @@ function connectTelemetryWs(wsUrl) {
     document.getElementById('live-ws-status').textContent = 'CLOSED';
     clearInterval(uptimeInterval);
     clearInterval(hzInterval);
+    // Auto-reconnect — service may not have been up yet at page load,
+    // or may have restarted. Retry every 5s using the current input value.
+    setTimeout(() => {
+      const url = document.getElementById('fg-ws-input').value;
+      if (url && !fgConnected) connectTelemetryWs(url);
+    }, 5000);
   };
 }
 
@@ -2547,12 +2588,6 @@ function applyRpiData(r) {
     el.style.color = r.throttled ? '#df4a4a' : '#4adf8a';
     document.getElementById('card-throttle').className = `telem-card ${r.throttled ? 'danger' : 'good'}`;
   }
-}
-
-function pushPlot(key, value) {
-  if (!plotData[key]) plotData[key] = [];
-  plotData[key].push(value);
-  if (plotData[key].length > PLOT_LEN) plotData[key].shift();
 }
 
 // ── Topic parsers ──────────────────────────────────────────────────────────
@@ -2667,7 +2702,14 @@ function parseGPS(m) {
 // ── UI helpers ─────────────────────────────────────────────────────────────
 function setVal(id, val) {
   const el = document.getElementById(id);
-  if (el) el.childNodes[0].textContent = val;
+  if (!el) return;
+  // First child is a text node when the element contains "value<span>unit</span>"
+  // Fall back to setting the full textContent when no text node is present
+  if (el.childNodes.length > 0 && el.childNodes[0].nodeType === Node.TEXT_NODE) {
+    el.childNodes[0].textContent = val;
+  } else {
+    el.textContent = val;
+  }
 }
 
 function setCard(valId, val, state, cardId) {
@@ -2818,8 +2860,77 @@ function drawGpsMap() {
   ctx.beginPath(); ctx.arc(toX(cp.lon), toY(cp.lat), 9, 0, Math.PI*2); ctx.stroke();
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// AUTO-CONNECT — derive all service URLs from the page hostname at load time.
+//
+// The viewer is always served from the Pi (serve.py on port 8080), so
+// window.location.hostname is always the Pi's IP (10.42.0.1 on hotspot,
+// or whatever address the user is using). All service ports are fixed:
+//   8080 — serve.py  (this page)
+//   8081 — camera_stream_server.py  (MJPEG)
+//   9001 — meshview_telemetry_server.py  (WebSocket telemetry)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function initTelemetry() {
+  const host  = window.location.hostname;
+  const wsUrl = `ws://${host}:9001`;
+  document.getElementById('fg-ws-input').value = wsUrl;
+  // Auto-connect immediately — the WS reconnects automatically on failure
+  // so this is safe even if meshview-telemetry is not yet up.
+  connectTelemetryWs(wsUrl);
+}
+// ══════════════════════════════════════════════════════════════════════════════
+let camRetryTimer = null;
+// Camera stream is served by camera_stream_server.py directly on port 8081.
+// It is NOT proxied through serve.py on 8080 — the proxy adds latency and
+// a dependency on serve.py being up. Direct connection is simpler.
+let camDefaultUrl = `http://${window.location.hostname}:8081/stream`;
+
+function initCameraFeed() {
+  const urlInput = document.getElementById('cam-url-input');
+  urlInput.value = camDefaultUrl;
+  loadCamFeed(camDefaultUrl);
+}
+
+function setCamUrl() {
+  const url = document.getElementById('cam-url-input').value.trim();
+  if (url) loadCamFeed(url);
+}
+window.setCamUrl = setCamUrl;
+
+function loadCamFeed(url) {
+  clearTimeout(camRetryTimer);
+  const img = document.getElementById('cam-img');
+  const dot = document.getElementById('cam-status-dot');
+  const placeholder = document.getElementById('cam-placeholder');
+  const sub = document.getElementById('cam-placeholder-sub');
+
+  img.classList.remove('loaded');
+  dot.className = '';
+
+  img.onload = () => {
+    img.classList.add('loaded');
+    placeholder.classList.add('hidden');
+    dot.className = 'live';
+  };
+
+  img.onerror = () => {
+    img.classList.remove('loaded');
+    placeholder.classList.remove('hidden');
+    dot.className = 'error';
+    sub.textContent = 'Stream unavailable — retrying in 5s';
+    camRetryTimer = setTimeout(() => loadCamFeed(url), 5000);
+  };
+
+  // Force reload by appending cache-busting param only once (MJPEG streams don't need it)
+  img.src = url;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Init: set viewer tab active on load
 document.body.classList.add('tab-viewer');
+initTelemetry();    // pre-fill WS URL and connect immediately
+initCameraFeed();   // pre-fill camera URL and start loading
 </script>
 
 </body>

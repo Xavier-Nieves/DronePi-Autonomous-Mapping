@@ -120,7 +120,29 @@ class SLAMBridgeNode(Node):
         )
 
     def _callback(self, msg: Odometry) -> None:
-        """Forward pose and velocity from Point-LIO to MAVROS."""
+        """Forward pose and velocity from Point-LIO to MAVROS.
+
+        Covariance policy
+        -----------------
+        Point-LIO publishes both pose.covariance and twist.covariance as all
+        zeros. EKF2 interprets zero covariance as either infinite certainty
+        (trusts this measurement above all others) or an invalid measurement
+        (rejects it entirely), depending on firmware version. Both outcomes
+        corrupt the EKF state. Explicit diagonal values are therefore assigned
+        here rather than passing through the zeros from Point-LIO.
+
+        Pose covariance (6×6 diagonal, row-major, indices [0,7,14,21,28,35]):
+            0.01 m²  for x, y, z position   → ±10 cm 1-sigma
+            0.01 rad² for roll, pitch, yaw  → ±6 deg 1-sigma
+        These values reflect typical Point-LIO drift over a short indoor/outdoor
+        mission. Increase if EKF2 position innovations are consistently large.
+
+        Twist covariance (6×6 diagonal, indices [0,7,14]):
+            0.04 (m/s)² for vx, vy          → ±20 cm/s 1-sigma
+            0.10 (m/s)² for vz              → ±32 cm/s 1-sigma (less accurate)
+            1.00 (rad/s)² for angular rates → not estimated by Point-LIO,
+                                              set high so EKF2 ignores them
+        """
 
         # ── Pose-only message ─────────────────────────────────────────────────
         pose                 = PoseStamped()
@@ -135,8 +157,30 @@ class SLAMBridgeNode(Node):
         odom.header.stamp    = msg.header.stamp
         odom.header.frame_id = "odom"
         odom.child_frame_id  = "base_link"
-        odom.pose            = msg.pose
-        odom.twist           = msg.twist       # body-frame velocity from Point-LIO
+
+        # Copy pose with explicit covariance diagonal.
+        # odom.pose is a PoseWithCovariance — set the pose then overwrite
+        # the covariance so we never forward Point-LIO's zero values.
+        odom.pose.pose = msg.pose.pose
+        odom.pose.covariance[0]  = 0.01   # x  variance (m²)
+        odom.pose.covariance[7]  = 0.01   # y  variance
+        odom.pose.covariance[14] = 0.01   # z  variance
+        odom.pose.covariance[21] = 0.01   # roll  variance (rad²)
+        odom.pose.covariance[28] = 0.01   # pitch variance
+        odom.pose.covariance[35] = 0.01   # yaw   variance
+
+        # Copy velocity with explicit covariance diagonal.
+        # twist.linear is body-frame velocity from Point-LIO IMU integration.
+        # twist.angular is not estimated — set high variance so EKF2 ignores it.
+        odom.twist.twist.linear.x = msg.twist.twist.linear.x
+        odom.twist.twist.linear.y = msg.twist.twist.linear.y
+        odom.twist.twist.linear.z = msg.twist.twist.linear.z
+        odom.twist.covariance[0]  = 0.04   # vx variance (m/s)²
+        odom.twist.covariance[7]  = 0.04   # vy variance
+        odom.twist.covariance[14] = 0.10   # vz variance (less accurate)
+        odom.twist.covariance[21] = 1.00   # wx — not estimated, EKF2 ignores
+        odom.twist.covariance[28] = 1.00   # wy
+        odom.twist.covariance[35] = 1.00   # wz
 
         self.odom_pub.publish(odom)
 

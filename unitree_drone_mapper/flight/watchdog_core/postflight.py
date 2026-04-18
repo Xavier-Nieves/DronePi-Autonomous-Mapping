@@ -7,6 +7,22 @@ Launches run_postflight.py as a subprocess and:
   - Plays TUNE_POSTPROCESS_DONE when the subprocess exits with code 0
   - Plays TUNE_ERROR once if it exits non-zero
 
+Interpreter selection
+---------------------
+postprocess_mesh.py requires open3d, trimesh, scipy, pdal, and rosbags —
+all installed in the dronepi conda environment, not in system Python.
+The watchdog service runs under /usr/bin/python3 (sys.executable), so
+launching the postflight script with sys.executable would fail at the
+first import.
+
+Resolution order:
+  1. ~/miniforge3/envs/dronepi/bin/python3   (standard Miniforge install)
+  2. ~/anaconda3/envs/dronepi/bin/python3    (Anaconda install fallback)
+  3. ~/miniconda3/envs/dronepi/bin/python3   (Miniconda install fallback)
+  4. sys.executable                           (last resort — may lack packages)
+
+The selected interpreter is logged at launch so failures are diagnosable.
+
 Buzzer → LED coherence
 ----------------------
 The PostflightBuzzerDriver (buzzer.py) reads /tmp/postflight_status.json
@@ -35,8 +51,33 @@ from pathlib import Path
 from .buzzer import PostflightBuzzerDriver, TUNE_ERROR, TUNE_POSTPROCESS_DONE
 from .logging_utils import log
 
-SCRIPT_DIR         = Path(__file__).parent.parent
-POSTFLIGHT_SCRIPT  = SCRIPT_DIR.parent / "utils" / "run_postflight.py"
+SCRIPT_DIR        = Path(__file__).parent.parent
+POSTFLIGHT_SCRIPT = SCRIPT_DIR.parent / "utils" / "run_postflight.py"
+
+# ── Conda interpreter resolution ──────────────────────────────────────────────
+# Checked in priority order. The first path that exists wins.
+# sys.executable is the final fallback so the watchdog never hard-crashes
+# even on a non-standard install, but a warning is logged so the operator
+# knows the pipeline may fail at import time.
+_CONDA_CANDIDATES = [
+    Path.home() / "miniforge3"  / "envs" / "dronepi" / "bin" / "python3",
+    Path.home() / "anaconda3"   / "envs" / "dronepi" / "bin" / "python3",
+    Path.home() / "miniconda3"  / "envs" / "dronepi" / "bin" / "python3",
+]
+
+
+def _resolve_python() -> str:
+    """Return the path to the dronepi conda Python, falling back to sys.executable."""
+    for candidate in _CONDA_CANDIDATES:
+        if candidate.exists():
+            return str(candidate)
+    log(
+        "[POSTFLIGHT] WARN — dronepi conda env not found at any standard path. "
+        "Falling back to sys.executable. Pipeline may fail if open3d/trimesh/pdal "
+        "are not installed in system Python. "
+        "Expected: ~/miniforge3/envs/dronepi/bin/python3"
+    )
+    return sys.executable
 
 
 class PostflightMonitor:
@@ -55,7 +96,7 @@ class PostflightMonitor:
     """
 
     def __init__(self, reader) -> None:
-        self._reader   = reader
+        self._reader    = reader
         self._pf_buzzer = PostflightBuzzerDriver(
             play_tune_fn=reader.play_tune,
         )
@@ -78,7 +119,7 @@ class PostflightMonitor:
     def trigger(self) -> None:
         """Launch the postflight script. No-op if already running."""
         if not POSTFLIGHT_SCRIPT.exists():
-            log(f"[WARN] Post-flight script not found: {POSTFLIGHT_SCRIPT}")
+            log(f"[POSTFLIGHT] WARN — Post-flight script not found: {POSTFLIGHT_SCRIPT}")
             return
 
         with self._lock:
@@ -87,11 +128,13 @@ class PostflightMonitor:
                 return
             self._active = True
 
-        log("[POSTFLIGHT] Launching post-flight processing...")
+        python = _resolve_python()
+        log(f"[POSTFLIGHT] Launching post-flight processing...")
+        log(f"[POSTFLIGHT] Interpreter: {python}")
 
         try:
             proc = subprocess.Popen(
-                [sys.executable, str(POSTFLIGHT_SCRIPT), "--auto", "--skip-wait"],
+                [python, str(POSTFLIGHT_SCRIPT), "--auto", "--skip-wait"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -130,10 +173,7 @@ class PostflightMonitor:
             # Stop the background heartbeat tick.
             # Terminal tones (TUNE_POSTPROCESS_DONE / TUNE_ERROR) are handled
             # by PostflightBuzzerDriver.poll() which reads postflight_status.json
-            # written by PostflightIPC in postprocess_mesh.py. This fires for
-            # both watchdog-launched and manually-run postflight. Calling
-            # play_tune() here would double-play via watchdog and be silent
-            # when run manually — so we leave it entirely to poll().
+            # written by PostflightIPC in postprocess_mesh.py.
             self._pf_buzzer.stop()
 
             if proc.returncode == 0:

@@ -2,10 +2,10 @@ rosbag2_bagfile_information:
   version: 9
   storage_identifier: sqlite3
   duration:
-    nanoseconds: 20943424924
+    nanoseconds: 4782584802
   starting_time:
-    nanoseconds_since_epoch: 1776314155715444279
-  message_count: 23251
+    nanoseconds_since_epoch: 1776484697605411886
+  message_count: 3037
   topics_with_message_count:
     - topic_metadata:
         name: /mavros/local_position/pose
@@ -28,29 +28,7 @@ rosbag2_bagfile_information:
               nsec: 854775807
             avoid_ros_namespace_conventions: false
         type_description_hash: RIHS01_10f3786d7d40fd2b54367835614bff85d4ad3b5dab62bf8bca0cc232d73b4cd8
-      message_count: 541
-    - topic_metadata:
-        name: /aft_mapped_to_init
-        type: nav_msgs/msg/Odometry
-        serialization_format: cdr
-        offered_qos_profiles:
-          - history: unknown
-            depth: 0
-            reliability: reliable
-            durability: volatile
-            deadline:
-              sec: 9223372036
-              nsec: 854775807
-            lifespan:
-              sec: 9223372036
-              nsec: 854775807
-            liveliness: automatic
-            liveliness_lease_duration:
-              sec: 9223372036
-              nsec: 854775807
-            avoid_ros_namespace_conventions: false
-        type_description_hash: RIHS01_3cc97dc7fb7502f8714462c526d369e35b603cfc34d946e3f2eda2766dfec6e0
-      message_count: 22545
+      message_count: 102
     - topic_metadata:
         name: /cloud_registered
         type: sensor_msgs/msg/PointCloud2
@@ -72,17 +50,39 @@ rosbag2_bagfile_information:
               nsec: 854775807
             avoid_ros_namespace_conventions: false
         type_description_hash: RIHS01_9198cabf7da3796ae6fe19c4cb3bdd3525492988c70522628af5daa124bae2b5
-      message_count: 165
+      message_count: 20
+    - topic_metadata:
+        name: /aft_mapped_to_init
+        type: nav_msgs/msg/Odometry
+        serialization_format: cdr
+        offered_qos_profiles:
+          - history: unknown
+            depth: 0
+            reliability: reliable
+            durability: volatile
+            deadline:
+              sec: 9223372036
+              nsec: 854775807
+            lifespan:
+              sec: 9223372036
+              nsec: 854775807
+            liveliness: automatic
+            liveliness_lease_duration:
+              sec: 9223372036
+              nsec: 854775807
+            avoid_ros_namespace_conventions: false
+        type_description_hash: RIHS01_3cc97dc7fb7502f8714462c526d369e35b603cfc34d946e3f2eda2766dfec6e0
+      message_count: 2915
   compression_format: ""
   compression_mode: ""
   relative_file_paths:
-    - square_20260416_003553_0.db3
+    - square_20260417_235813_0.db3
   files:
-    - path: square_20260416_003553_0.db3
+    - path: square_20260417_235813_0.db3
       starting_time:
-        nanoseconds_since_epoch: 1776314155715444279
+        nanoseconds_since_epoch: 1776484697605411886
       duration:
-        nanoseconds: 20943424924
-      message_count: 23251
+        nanoseconds: 4782584802
+      message_count: 3037
   custom_data: ~
   ros_distro: jazzy

@@ -258,7 +258,7 @@ def main() -> None:
             if lock_mode == "bench_scan":
                 if stack.is_running:
                     scan_beeper.stop()
-                    stack.stop()
+                    stack.stop("watchdog_yielded_bench")
                     _play_tune(reader, TUNE_SCAN_FINISHED, "scan_finished")
                     led_state = "SCAN_FINISHED"
                     led_until = time.time() + _MIN_TRANSIENT_S
@@ -277,7 +277,7 @@ def main() -> None:
             if lock_mode == "autonomous":
                 if stack.is_running:
                     scan_beeper.stop()
-                    stack.stop()
+                    stack.stop("watchdog_yielded_auto")
                     _play_tune(reader, TUNE_SCAN_FINISHED, "scan_finished")
                     led_state = "SCAN_FINISHED"
                     led_until = time.time() + _MIN_TRANSIENT_S
@@ -322,7 +322,7 @@ def main() -> None:
                 if not reader.armed:
                     log("[WATCHDOG] Disarmed — stopping stack")
                     scan_beeper.stop()
-                    stack.stop()
+                    stack.stop("manual_scan_disarm")
                     _play_tune(reader, TUNE_SCAN_FINISHED, "scan_finished")
                     led_state = "SCAN_FINISHED"
                     led_until = time.time() + _MIN_TRANSIENT_S
@@ -373,7 +373,7 @@ def main() -> None:
                 if ENABLE_RC_TOGGLE and reader.check_toggle_pressed():
                     log("RC button pressed — stopping stack")
                     scan_beeper.stop()
-                    stack.stop()
+                    stack.stop("rc_toggle_stop")
                     _play_tune(reader, TUNE_SCAN_FINISHED, "scan_finished")
                     led_state = "SCAN_FINISHED"
                     led_until = time.time() + _MIN_TRANSIENT_S
@@ -396,7 +396,7 @@ def main() -> None:
         postflight.poll()
         alarms.shutdown()
         if stack.is_running:
-            stack.stop()
+            stack.stop("watchdog_shutdown")
         reader.shutdown()
         _clear_status()
         log("Watchdog stopped.")

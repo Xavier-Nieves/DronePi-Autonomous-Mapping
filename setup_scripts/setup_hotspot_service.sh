@@ -1,100 +1,104 @@
 #!/bin/bash
-# =============================================================================
-# scripts/setup_hotspot_service.sh
-# Configures the Pi as a Wi-Fi access point (SSID: dronepi-ap)
-# and registers dronepi-hotspot as a systemd service.
-# Called by setup.sh or run standalone: sudo bash scripts/setup_hotspot_service.sh
-# =============================================================================
-set -euo pipefail
+# ─────────────────────────────────────────────────────────────────────────────
+# setup_hotspot_service.sh
+# Configures the Pi Wi-Fi hotspot (dronepi-ap) as a persistent systemd service
+# backed by hotspot_watchdog.py — monitors wlan0 every 10s and auto-recovers
+# if the hotspot drops. Replaces the old oneshot service.
+#
+# Run once with sudo:
+#   sudo bash setup_hotspot_service.sh
+#
+# After running:
+#   - Hotspot SSID : dronepi-ap
+#   - Password     : dronepi123
+#   - Pi IP        : 10.42.0.1
+#   - SSH from laptop: ssh dronepi@10.42.0.1
+# ─────────────────────────────────────────────────────────────────────────────
 
-SERVICE="dronepi-hotspot"
-DRONEPI_USER="dronepi"
+set -e
+
 SSID="dronepi-ap"
 PASSWORD="dronepi123"
-INTERFACE="wlan0"
-IP="10.42.0.1"
-DHCP_RANGE="10.42.0.10,10.42.0.50,24h"
+IFACE="wlan0"
+SERVICE="dronepi-hotspot"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WATCHDOG_SRC="$SCRIPT_DIR/hotspot_watchdog.py"
+WATCHDOG_DST="/home/dronepi/unitree_lidar_project/rpi_server/hotspot_watchdog.py"
 
-[[ $EUID -ne 0 ]] && { echo "[ERROR] Run with sudo."; exit 1; }
+echo "======================================================="
+echo "  DronePi Hotspot Service Setup (Watchdog)"
+echo "======================================================="
 
-echo "[hotspot] Installing hostapd and dnsmasq..."
-apt-get install -y -qq hostapd dnsmasq
+# ── 1. Confirm interface exists ───────────────────────────────────────────────
+echo ""
+echo "[1/5] Checking Wi-Fi interface..."
+if ! ip link show "$IFACE" &>/dev/null; then
+    echo "  [FAIL] Interface $IFACE not found."
+    echo "  Available interfaces:"
+    ip link show | grep -E "^[0-9]+:" | awk '{print "  " $2}'
+    echo "  Edit IFACE= in this script and re-run."
+    exit 1
+fi
+echo "  [OK] $IFACE found"
 
-systemctl stop hostapd dnsmasq 2>/dev/null || true
-systemctl unmask hostapd
+# ── 2. Ensure WPA2 hotspot connection profile exists ─────────────────────────
+echo ""
+echo "[2/5] Ensuring WPA2 hotspot connection profile..."
 
-echo "[hotspot] Configuring hostapd..."
-tee /etc/hostapd/hostapd.conf > /dev/null <<EOF
-interface=${INTERFACE}
-driver=nl80211
-ssid=${SSID}
-hw_mode=g
-channel=7
-wmm_enabled=0
-macaddr_acl=0
-auth_algs=1
-ignore_broadcast_ssid=0
-wpa=2
-wpa_passphrase=${PASSWORD}
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
-rsn_pairwise=CCMP
-EOF
-
-echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' > /etc/default/hostapd
-
-echo "[hotspot] Configuring dnsmasq..."
-# Back up original if not already backed up
-[[ ! -f /etc/dnsmasq.conf.orig ]] && cp /etc/dnsmasq.conf /etc/dnsmasq.conf.orig
-
-tee /etc/dnsmasq.conf > /dev/null <<EOF
-interface=${INTERFACE}
-dhcp-range=${DHCP_RANGE}
-domain=local
-address=/dronepi.local/${IP}
-EOF
-
-echo "[hotspot] Setting static IP on ${INTERFACE}..."
-# Use NetworkManager nmcli if available, otherwise write dhcpcd config
-if command -v nmcli &>/dev/null; then
-    nmcli con delete "dronepi-hotspot" 2>/dev/null || true
-    nmcli con add type wifi ifname "$INTERFACE" con-name "dronepi-hotspot" \
-        autoconnect yes ssid "$SSID" \
-        mode ap \
-        ipv4.method shared \
-        ipv4.addresses "${IP}/24" \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "$PASSWORD" 2>/dev/null || true
-    nmcli con up "dronepi-hotspot" 2>/dev/null || true
-    echo "[hotspot] Configured via NetworkManager"
-else
-    # Fallback: static IP via dhcpcd
-    DHCPCD_CONF="/etc/dhcpcd.conf"
-    if ! grep -q "interface ${INTERFACE}" "$DHCPCD_CONF" 2>/dev/null; then
-        echo "" >> "$DHCPCD_CONF"
-        echo "interface ${INTERFACE}" >> "$DHCPCD_CONF"
-        echo "    static ip_address=${IP}/24" >> "$DHCPCD_CONF"
-        echo "    nohook wpa_supplicant" >> "$DHCPCD_CONF"
+# Delete any legacy hotspot profiles that may conflict
+for OLD in "Hotspot" "dronepi-ap"; do
+    if nmcli connection show "$OLD" &>/dev/null 2>&1; then
+        nmcli connection delete "$OLD" 2>/dev/null || true
+        echo "  [INFO] Deleted legacy profile: $OLD"
     fi
+done
+
+# Create fresh WPA2 profile if it does not exist
+if ! nmcli connection show "$SERVICE" &>/dev/null 2>&1; then
+    nmcli connection add \
+        type wifi ifname "$IFACE" mode ap \
+        con-name "$SERVICE" ssid "$SSID" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "$PASSWORD" \
+        wifi-sec.proto rsn \
+        wifi-sec.pairwise ccmp \
+        wifi-sec.group ccmp \
+        ipv4.method shared
+    echo "  [OK] WPA2 hotspot profile created: $SERVICE"
+else
+    echo "  [OK] Profile already exists: $SERVICE"
 fi
 
-echo "[hotspot] Writing service file..."
-tee /etc/systemd/system/${SERVICE}.service > /dev/null <<UNIT
+# ── 3. Install watchdog script ────────────────────────────────────────────────
+echo ""
+echo "[3/5] Installing hotspot_watchdog.py..."
+if [ ! -f "$WATCHDOG_SRC" ]; then
+    echo "  [FAIL] hotspot_watchdog.py not found at $WATCHDOG_SRC"
+    exit 1
+fi
+cp "$WATCHDOG_SRC" "$WATCHDOG_DST"
+chown dronepi:dronepi "$WATCHDOG_DST"
+chmod 755 "$WATCHDOG_DST"
+echo "  [OK] Watchdog installed at $WATCHDOG_DST"
+
+# ── 4. Create persistent systemd service ─────────────────────────────────────
+echo ""
+echo "[4/5] Creating persistent systemd service..."
+
+cat > /etc/systemd/system/${SERVICE}.service << UNIT
 [Unit]
-Description=DronePi Wi-Fi Hotspot (${SSID})
-After=network.target
+Description=DronePi Wi-Fi Hotspot (dronepi-ap) — persistent watchdog
+After=NetworkManager.service network.target
+Wants=NetworkManager.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c "\
-    ip link set ${INTERFACE} up; \
-    ip addr add ${IP}/24 dev ${INTERFACE} 2>/dev/null || true; \
-    systemctl start hostapd; \
-    systemctl start dnsmasq"
-ExecStop=/bin/bash -c "\
-    systemctl stop dnsmasq; \
-    systemctl stop hostapd"
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 ${WATCHDOG_DST}
+Restart=always
+RestartSec=5
+
+# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=dronepi-hotspot
@@ -103,18 +107,57 @@ SyslogIdentifier=dronepi-hotspot
 WantedBy=multi-user.target
 UNIT
 
+echo "  [OK] Service file written to /etc/systemd/system/${SERVICE}.service"
+
+# ── 5. Enable and start ───────────────────────────────────────────────────────
+echo ""
+echo "[5/5] Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable ${SERVICE}.service
-systemctl enable hostapd
-systemctl enable dnsmasq
+
+# Stop old instance if running before starting new one
+systemctl stop ${SERVICE}.service 2>/dev/null || true
+sleep 1
 systemctl start ${SERVICE}.service
 
-sleep 3
+# Wait for watchdog to bring hotspot up
+sleep 5
+
+# ── Verify ────────────────────────────────────────────────────────────────────
 STATUS=$(systemctl is-active ${SERVICE}.service)
-if [[ "$STATUS" == "active" ]]; then
-    echo "[hotspot] Service active — SSID: $SSID / $IP"
+if [ "$STATUS" = "active" ]; then
+    echo "  [OK] Watchdog service is active"
 else
-    echo "[hotspot] WARN: Service status is $STATUS"
-    echo "          Check: sudo journalctl -u ${SERVICE} -n 30"
-    echo "          The TP-Link RTL8821AU adapter must be present for hostapd to start."
+    echo "  [WARN] Service status: $STATUS"
+    echo "  Check with: sudo journalctl -u ${SERVICE} -n 20"
 fi
+
+IP=$(ip addr show ${IFACE} 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+if [ -n "$IP" ]; then
+    echo "  [OK] Pi IP on hotspot: $IP"
+else
+    echo "  [WARN] IP not yet assigned — watchdog may still be initializing"
+    echo "  Run: ip addr show ${IFACE}"
+fi
+
+echo ""
+echo "======================================================="
+echo "  Hotspot service setup complete."
+echo "======================================================="
+echo ""
+echo "  SSID     : $SSID"
+echo "  Password : $PASSWORD"
+echo "  Pi IP    : 10.42.0.1"
+echo ""
+echo "  Watchdog : checks wlan0 every 10s, auto-recovers on drop"
+echo ""
+echo "  On your laptop:"
+echo "    1. Connect to Wi-Fi: $SSID"
+echo "    2. SSH: ssh dronepi@10.42.0.1"
+echo "    3. Browser: http://10.42.0.1:8080/meshview.html"
+echo ""
+echo "  Service commands:"
+echo "    sudo systemctl status ${SERVICE}"
+echo "    sudo systemctl restart ${SERVICE}"
+echo "    sudo journalctl -u ${SERVICE} -f"
+echo ""

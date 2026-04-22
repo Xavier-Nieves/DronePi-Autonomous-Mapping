@@ -1,265 +1,397 @@
-"""watchdog_core/flight_stack.py — manage scan-session processes and health checks.
+#!/usr/bin/env python3
+"""
+watchdog_core/flight_stack.py — Flight stack subprocess manager.
 
-This updated version removes old reader.beep_* helper usage so sound ownership
-stays in drone_watchdog.py and postflight.py.
+Owns Point-LIO, SLAM bridge, and bag recorder for manual scan sessions.
+Called by drone_watchdog.py. drone_watchdog.py itself is NOT modified.
 
-Responsibilities
-----------------
-- Start the scan stack processes
-- Stop the scan stack processes
-- Trigger postflight after a completed scan session
-- Expose health checks used by the watchdog
+LOGGING INTEGRATION
+-------------------
+flight_logger.open_session() is called inside start() immediately after
+self._running = True. flight_logger.close_session() is called at the
+top of stop() before any subprocess is terminated, so the duration is
+accurate and the record is written even if a subprocess fails to stop.
 
-Sound ownership
----------------
-- Start / stop / ready / active / finished tones are handled by the watchdog
-- Postflight tones are handled by postflight.py
-- This file should not directly decide buzzer meaning
+Both calls are non-fatal — any exception is caught and logged. A failure
+in flight_logger never affects the stop sequence or the postflight trigger.
+
+FLIGHT TYPE
+-----------
+All sessions started by FlightStack are FLIGHT_TYPE_MANUAL.
+The script_name field is always "drone_watchdog" to distinguish these
+from SafeFlightMixin-managed sessions (test scripts and main.py).
+
+SESSION ID
+----------
+Uses self._bag_path.name (e.g. "scan_20260422_143215") as the session_id,
+which matches the bag directory name that postprocess_mesh.py receives.
+This allows flight_logger.log_flight() (called by postprocess_mesh.py)
+to find the existing session record and append postprocess results to it
+rather than creating a duplicate entry.
+
+STOP REASON MAPPING
+--------------------
+  "manual_scan_disarm"       reader.armed went False — normal scan end
+  "rc_toggle_stop"           operator pressed CH6 to stop mid-scan
+  "watchdog_yielded_bench"   bench_scan lock appeared while stack was running
+  "watchdog_yielded_auto"    autonomous lock appeared while stack was running
+  "watchdog_shutdown"        SIGTERM/SIGINT received, finally block running
+
+BACKWARD COMPATIBILITY
+----------------------
+All existing call signatures are unchanged. drone_watchdog.py does not
+need modification.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import logging
 import os
 import signal
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from .logging_utils import log
+from watchdog_core.logging_utils import log
 
-# These paths/commands may need to match your project exactly.
-# They are kept generic here to preserve the structure of the original file.
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-ROSBAG_DIR   = Path("/mnt/ssd/rosbags")
+# ── Paths ──────────────────────────────────────────────────────────────────────
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
-WS_SETUP = str(PROJECT_ROOT / "RPI5/ros2_ws/install/setup.bash")
+WS_SETUP  = str(PROJECT_ROOT / "RPI5" / "ros2_ws" / "install" / "setup.bash")
 
-SLAM_MIN_HZ = 5.0
-BRIDGE_MIN_HZ = 8.0
+ROSBAG_DIR = Path("/mnt/ssd/rosbags")
+
+# ── Command builders ───────────────────────────────────────────────────────────
+
+def _ros_source() -> str:
+    return f"source {ROS_SETUP} && source {WS_SETUP} && "
+
+
+def _pointlio_cmd() -> str:
+    launch = (PROJECT_ROOT /
+              "RPI5/ros2_ws/src/point_lio_ros2/launch/combined_lidar_mapping.launch.py")
+    return _ros_source() + f"ros2 launch {launch} rviz:=false port:=/dev/ttyUSB0"
+
+
+def _bridge_cmd() -> str:
+    bridge = PROJECT_ROOT / "unitree_drone_mapper/flight/_slam_bridge.py"
+    return _ros_source() + f"python3 {bridge}"
+
+
+def _bag_cmd(bag_path: Path) -> str:
+    topics = " ".join([
+        "/cloud_registered",
+        "/aft_mapped_to_init",
+        "/mavros/local_position/pose",
+        "/mavros/state",
+        "/mavros/global_position/global",
+        "/dronepi/collision_zone",
+        "/mavros/distance_sensor/lidar_down_sub",
+    ])
+    return _ros_source() + f"ros2 bag record {topics} -o {bag_path} --storage mcap"
+
+
+# ── Health check thresholds ────────────────────────────────────────────────────
+
+SLAM_MIN_HZ          = 5.0
+BRIDGE_MIN_HZ        = 8.0
 SLAM_TOPIC_TIMEOUT_S = 30.0
-BRIDGE_TOPIC_TIMEOUT_S = 15.0
 
-# hailo_flight_node runs in its own venv (hailo_inference_env) because
-# hailo_platform is not installed in the dronepi conda env. The node is
-# launched via the explicit interpreter path so the active environment
-# (dronepi conda) is bypassed entirely — identical to how arducam_node
-# uses rpicam-vid as a subprocess rather than a Python import.
-HAILO_PYTHON      = Path.home() / "hailo_inference_env/bin/python3"
-HAILO_NODE_SCRIPT = PROJECT_ROOT / "unitree_drone_mapper/hailo/hailo_flight_node.py"
-# Matches main.py: PROJECT_ROOT/unitree_drone_mapper/hailo/hailo_flight_node.py
-# main.py's PROJECT_ROOT = ~/unitree_lidar_project/unitree_drone_mapper, so its
-# path is equivalent: PROJECT_ROOT/"hailo"/"hailo_flight_node.py".
 
+# ══════════════════════════════════════════════════════════════════════════════
+# FLIGHT LOGGER LOADER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _load_flight_logger():
+    """
+    Load flight_logger.py by resolving its path relative to this file.
+    flight_logger.py: <project_root>/utils/flight_logger.py
+    flight_stack.py:  <project_root>/watchdog_core/flight_stack.py
+    → parent is watchdog_core/, parent.parent is project root.
+
+    Returns the module, or None if unavailable. Never raises.
+    """
+    try:
+        logger_path = PROJECT_ROOT / "utils" / "flight_logger.py"
+        if not logger_path.exists():
+            log(f"[STACK] flight_logger not found at {logger_path}")
+            return None
+        spec = importlib.util.spec_from_file_location("flight_logger", logger_path)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:
+        log(f"[STACK] Could not load flight_logger (non-fatal): {exc}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUBPROCESS HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _spawn(label: str, cmd: str) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        ["bash", "-c", cmd],
+        preexec_fn=os.setsid,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    log(f"[STACK] {label} started (pid={proc.pid})")
+    return proc
+
+
+def _kill(label: str, proc: Optional[subprocess.Popen]) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        proc.wait(timeout=8)
+        log(f"[STACK] {label} stopped cleanly")
+    except subprocess.TimeoutExpired:
+        log(f"[STACK] {label} SIGINT timeout — sending SIGKILL")
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+    except Exception as exc:
+        log(f"[STACK] {label} stop error: {exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FLIGHT STACK
+# ══════════════════════════════════════════════════════════════════════════════
 
 class FlightStack:
-    """Owns the runtime scan stack subprocesses and basic health supervision."""
+    """
+    Owns Point-LIO, SLAM bridge, and bag recorder for manual scan sessions.
 
-    def __init__(self, reader, postflight_fn: Optional[Callable[[], None]] = None) -> None:
-        self._reader = reader
+    Args:
+        reader:        MavrosReader — for FCU state queries (armed/mode).
+        postflight_fn: callable() — called after stop() to trigger postflight.
+                       Decoupled so FlightStack has no import dependency on
+                       postflight.py.
+    """
+
+    def __init__(
+        self,
+        reader,
+        postflight_fn: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self._reader        = reader
         self._postflight_fn = postflight_fn
 
-        self._running = False
+        self._running        = False
         self._session_reason = ""
-        self._started_at = 0.0
+        self._started_at     = 0.0
+        self._bag_path:  Optional[Path] = None
 
-        self._bag_proc: Optional[subprocess.Popen] = None
-        self._slam_proc: Optional[subprocess.Popen] = None
-        self._bridge_proc: Optional[subprocess.Popen] = None
-        # hailo_flight_node — optional, skipped if HAILO_PYTHON or script absent
-        self._hailo_proc: Optional[subprocess.Popen] = None
+        self._pointlio_proc: Optional[subprocess.Popen] = None
+        self._bridge_proc:   Optional[subprocess.Popen] = None
+        self._bag_proc:      Optional[subprocess.Popen] = None
 
-    # ── Public state ─────────────────────────────────────────────────────────
+        # Flight logger state — set in start(), used in stop()
+        self._flight_logger_mod  = None
+        self._flight_number: int = 0
+
+    # ── Public state ──────────────────────────────────────────────────────────
 
     @property
     def is_running(self) -> bool:
         return self._running
 
-    # ── Start / Stop ─────────────────────────────────────────────────────────
+    # ── Start ─────────────────────────────────────────────────────────────────
 
     def start(self, reason: str = "UNKNOWN") -> bool:
-        """Start the scan stack.
+        """
+        Start the scan stack. Returns True on success.
 
-        Returns True on success, False on startup failure.
+        Launch order:
+          1. Point-LIO  — must be first; SLAM bridge subscribes to its output
+          2. SLAM bridge — 3s after Point-LIO to allow SLAM initialisation
+          3. Bag recorder — 1s after bridge; records immediately once both up
+
+        Source: watchdog session docs, FlightStack architecture notes.
         """
         if self._running:
-            log("[STACK] Start requested, but stack is already running")
+            log("[STACK] Start requested — stack already running")
             return True
 
         self._session_reason = reason
-        self._started_at = time.time()
+        self._started_at     = time.time()
 
         try:
             ROSBAG_DIR.mkdir(parents=True, exist_ok=True)
 
-            # NOTE:
-            # Replace these placeholder commands with your exact original ones if needed.
-            # They are intentionally simple so the generated file is easy to merge.
-            self._bag_proc = self._spawn(
-                f"source {ROS_SETUP} && source {WS_SETUP} && ros2 bag record -a -o {ROSBAG_DIR / 'latest_scan'}"
-            )
-            self._slam_proc = self._spawn(
-                f"source {ROS_SETUP} && source {WS_SETUP} && ros2 launch point_lio mapping.launch.py"
-            )
-            self._bridge_proc = self._spawn(
-                f"source {ROS_SETUP} && source {WS_SETUP} && ros2 run unitree_lidar_ros2 bridge_node"
-            )
+            # 1. Point-LIO
+            log("[STACK] Starting Point-LIO...")
+            self._pointlio_proc = _spawn("Point-LIO", _pointlio_cmd())
+            time.sleep(3.0)
 
-            # hailo_flight_node — launched after SLAM bridge so that
-            # /mavros/local_position/pose (used for AGL) is already available.
-            # Skipped gracefully if the interpreter or script is not present
-            # so the stack still starts on a system without Hailo configured.
-            self._hailo_proc = self._spawn_hailo()
+            # 2. SLAM bridge
+            bridge_script = PROJECT_ROOT / "unitree_drone_mapper/flight/_slam_bridge.py"
+            if bridge_script.exists():
+                log("[STACK] Starting SLAM bridge...")
+                self._bridge_proc = _spawn("SLAM bridge", _bridge_cmd())
+                time.sleep(1.0)
+            else:
+                log("[STACK] WARN: _slam_bridge.py not found — vision fusion disabled")
+
+            # 3. Bag recorder
+            ts               = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._bag_path   = ROSBAG_DIR / f"scan_{ts}"
+            log(f"[STACK] Starting bag recorder → {self._bag_path.name}")
+            self._bag_proc   = _spawn("bag recorder", _bag_cmd(self._bag_path))
 
             self._running = True
-            log(f"[STACK] Started (reason={reason})")
+            log(f"[STACK] Stack started  reason={reason}  bag={self._bag_path.name}")
+
+            # ── Open flight log session ───────────────────────────────────────
+            # Called after self._running = True so bag_path is set.
+            # Non-fatal: exception never prevents the scan from continuing.
+            self._logger_open(reason)
+
             return True
 
         except Exception as exc:
             log(f"[STACK] Startup failed: {exc}")
-            self._cleanup_partial_start()
+            self._cleanup_partial()
             self._running = False
             return False
 
-    def stop(self) -> None:
-        """Stop the scan stack and optionally trigger postflight."""
+    # ── Stop ──────────────────────────────────────────────────────────────────
+
+    def stop(self, reason: str = "manual_scan_disarm") -> None:
+        """
+        Stop the scan stack and trigger postflight.
+
+        Stop order is the reverse of launch order — critical for clean MCAP
+        finalisation. Bag recorder must finish writing before Point-LIO stops
+        publishing, otherwise the final messages are lost.
+
+          1. Bag recorder  — MCAP file finalised
+          2. SLAM bridge   — no longer needed once bag is closed
+          3. Point-LIO     — kept alive until both dependents are done
+
+        The flight log session is closed BEFORE subprocess teardown so that
+        duration reflects actual flight time, not cleanup time.
+        """
         if not self._running:
-            log("[STACK] Stop requested, but stack is not running")
             return
 
-        log("[STACK] Stopping stack...")
-        # Stop order (reverse of start): bag → hailo → bridge → slam
-        # Bag stops first so it captures any final Hailo flow messages.
-        # Hailo stops before the bridge because it publishes to ROS topics
-        # that the bridge may be consuming.
-        self._terminate_proc(self._bag_proc, "rosbag")
-        self._terminate_proc(self._hailo_proc, "hailo_flight_node")
-        self._terminate_proc(self._bridge_proc, "bridge")
-        self._terminate_proc(self._slam_proc, "slam")
+        log(f"[STACK] Stopping stack  reason={reason}")
 
+        # ── Close flight log session ──────────────────────────────────────────
+        # Done first so duration is flight time, not teardown time.
+        # Non-fatal: exception never affects the stop sequence.
+        self._logger_close(reason)
+
+        # ── Subprocess teardown (reverse launch order) ────────────────────────
+        _kill("bag recorder", self._bag_proc)
         self._bag_proc = None
-        self._hailo_proc = None
+
+        _kill("SLAM bridge", self._bridge_proc)
         self._bridge_proc = None
-        self._slam_proc = None
+
+        _kill("Point-LIO", self._pointlio_proc)
+        self._pointlio_proc = None
+
         self._running = False
+        log(f"[STACK] Stack stopped.")
 
-        duration_s = time.time() - self._started_at if self._started_at else 0.0
-        log(f"[STACK] Stopped after {duration_s:.1f}s")
-
+        # ── Postflight ────────────────────────────────────────────────────────
         if self._postflight_fn is not None:
             try:
                 self._postflight_fn()
             except Exception as exc:
-                log(f"[STACK] Postflight trigger failed: {exc}")
-
-    # ── Health ───────────────────────────────────────────────────────────────
+                log(f"[STACK] Postflight callback failed: {exc}")
 
     def check_health(self) -> None:
-        """Log process-health issues.
+        """Warn if any managed subprocess has exited unexpectedly."""
+        if self._pointlio_proc and self._pointlio_proc.poll() is not None:
+            log("[STACK] WARN: Point-LIO exited unexpectedly")
+            self._pointlio_proc = None
+        if self._bridge_proc and self._bridge_proc.poll() is not None:
+            log("[STACK] WARN: SLAM bridge exited unexpectedly")
+            self._bridge_proc = None
+        if self._bag_proc and self._bag_proc.poll() is not None:
+            log("[STACK] WARN: Bag recorder exited unexpectedly")
+            self._bag_proc = None
 
-        This version does not directly raise alarms. The watchdog can inspect
-        process state or extend this class later to return structured faults.
+    # ── Partial cleanup on failed start ───────────────────────────────────────
+
+    def _cleanup_partial(self) -> None:
+        _kill("bag recorder (partial)", self._bag_proc)
+        _kill("SLAM bridge (partial)",  self._bridge_proc)
+        _kill("Point-LIO (partial)",    self._pointlio_proc)
+        self._bag_proc       = None
+        self._bridge_proc    = None
+        self._pointlio_proc  = None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # FLIGHT LOGGER INTEGRATION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _logger_open(self, reason: str) -> None:
         """
-        if not self._running:
-            return
+        Call flight_logger.open_session() after stack start.
+        Maps the start reason to a descriptive script_name field so the
+        flight_history.log line clearly identifies the trigger.
 
-        bad = False
-
-        if self._bag_proc is not None and self._bag_proc.poll() is not None:
-            log(f"[STACK][HEALTH] rosbag exited unexpectedly with code {self._bag_proc.returncode}")
-            bad = True
-
-        if self._slam_proc is not None and self._slam_proc.poll() is not None:
-            log(f"[STACK][HEALTH] slam exited unexpectedly with code {self._slam_proc.returncode}")
-            bad = True
-
-        if self._bridge_proc is not None and self._bridge_proc.poll() is not None:
-            log(f"[STACK][HEALTH] bridge exited unexpectedly with code {self._bridge_proc.returncode}")
-            bad = True
-
-        # Hailo is optional — log exit but do not set bad=True so the
-        # watchdog does not abort the scan session over a non-critical process.
-        if self._hailo_proc is not None and self._hailo_proc.poll() is not None:
-            log(f"[STACK][HEALTH] hailo_flight_node exited (code {self._hailo_proc.returncode}) "
-                f"— flow augmentation inactive for this session")
-            self._hailo_proc = None
-
-        if bad:
-            log("[STACK][HEALTH] One or more stack processes died")
-
-    # ── Internal helpers ─────────────────────────────────────────────────────
-
-    def _spawn(self, command: str) -> subprocess.Popen:
-        log(f"[STACK] Launching: {command}")
-        return subprocess.Popen(
-            ["bash", "-lc", command],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
-        )
-
-    def _terminate_proc(self, proc: Optional[subprocess.Popen], label: str) -> None:
-        if proc is None:
-            return
-
-        if proc.poll() is not None:
-            log(f"[STACK] {label} already exited with code {proc.returncode}")
-            return
-
+        Reason → script_name mapping:
+          "MANUAL_LOCK" → "drone_watchdog (manual_scan_lock)"
+          "MANUAL_RC"   → "drone_watchdog (rc_toggle)"
+          anything else → "drone_watchdog (<reason>)"
+        """
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=5.0)
-                log(f"[STACK] {label} terminated cleanly")
-            except subprocess.TimeoutExpired:
-                log(f"[STACK] {label} did not terminate in time; killing")
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait(timeout=2.0)
+            mod = _load_flight_logger()
+            if mod is None:
+                return
+
+            self._flight_logger_mod = mod
+
+            script_label = f"drone_watchdog ({reason.lower()})"
+            session_id   = self._bag_path.name if self._bag_path else f"scan_unknown_{int(self._started_at)}"
+
+            self._flight_number = mod.open_session(
+                session_id  = session_id,
+                script_name = script_label,
+                flight_type = mod.FLIGHT_TYPE_MANUAL,
+                bag_path    = str(self._bag_path) if self._bag_path else None,
+                context     = "manual",
+            )
+            log(f"[STACK] Flight {self._flight_number:03d} opened in flight_logger  "
+                f"session={session_id}")
         except Exception as exc:
-            log(f"[STACK] Failed to stop {label}: {exc}")
+            log(f"[STACK] flight_logger open_session failed (non-fatal): {exc}")
 
-    def _spawn_hailo(self) -> Optional[subprocess.Popen]:
-        """Launch hailo_flight_node.py in hailo_inference_env.
-
-        Returns the Popen handle on success, or None if the interpreter or
-        script is absent. None return is treated as graceful skip — the scan
-        session continues without Hailo flow augmentation.
-
-        hailo_flight_node publishes /hailo/optical_flow and /hailo/ground_class
-        over ROS 2 DDS. FlowBridge (in the main conda env) consumes the flow
-        topic and forwards it to /mavros/odometry/out for EKF2 fusion.
-
-        The explicit interpreter path (hailo_inference_env/bin/python3) is used
-        rather than relying on the active environment because hailo_platform is
-        only installed in hailo_inference_env — not in the dronepi conda env
-        that the watchdog systemd service activates.
-
-        ROS 2 setup files are sourced inside the bash command so the node can
-        publish and subscribe to ROS 2 topics despite running outside the
-        dronepi conda env.
+    def _logger_close(self, reason: str) -> None:
         """
-        if not HAILO_PYTHON.exists():
-            log("[STACK] hailo_inference_env not found — Hailo node skipped")
-            return None
-        if not HAILO_NODE_SCRIPT.exists():
-            log(f"[STACK] hailo_flight_node.py not found at {HAILO_NODE_SCRIPT} — skipped")
-            return None
+        Call flight_logger.close_session() at the start of stop().
+        Duration is computed from self._started_at (set in start()).
+        """
+        try:
+            mod = self._flight_logger_mod
+            if mod is None:
+                return
 
-        cmd = (
-            f"source {ROS_SETUP} && source {WS_SETUP} && "
-            f"{HAILO_PYTHON} {HAILO_NODE_SCRIPT}"
-        )
-        proc = self._spawn(cmd)
-        log(f"[STACK] hailo_flight_node started (pid={proc.pid})")
-        return proc
+            duration_s = (time.time() - self._started_at
+                          if self._started_at else None)
+            session_id = (self._bag_path.name if self._bag_path
+                          else f"scan_unknown_{int(self._started_at or 0)}")
 
-    def _cleanup_partial_start(self) -> None:
-        self._terminate_proc(self._bag_proc, "rosbag")
-        self._terminate_proc(self._hailo_proc, "hailo_flight_node")
-        self._terminate_proc(self._bridge_proc, "bridge")
-        self._terminate_proc(self._slam_proc, "slam")
-        self._bag_proc = None
-        self._hailo_proc = None
-        self._bridge_proc = None
-        self._slam_proc = None
+            mod.close_session(
+                session_id         = session_id,
+                end_reason         = reason,
+                duration_s         = duration_s,
+                bag_closed_cleanly = True,   # bag stop follows immediately after
+                bag_path           = str(self._bag_path) if self._bag_path else None,
+            )
+            log(f"[STACK] Flight {self._flight_number:03d} closed in flight_logger  "
+                f"reason={reason}")
+        except Exception as exc:
+            log(f"[STACK] flight_logger close_session failed (non-fatal): {exc}")

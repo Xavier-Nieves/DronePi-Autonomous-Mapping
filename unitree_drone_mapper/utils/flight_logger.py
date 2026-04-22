@@ -1,184 +1,443 @@
 #!/usr/bin/env python3
 """
-flight_logger.py — Flight history logger for DronePi.
+utils/flight_logger.py — DronePi flight history logger.
 
-Maintains a human-readable flight history log at:
-    ~/unitree_lidar_project/logs/flight_history.log
+DESIGN INTENT
+-------------
+Every arm event produces a record immediately — crash, clean land, test abort,
+or any outcome. Post-processing results are appended later if they run, but
+a missing or failed postprocess never prevents a flight from being recorded.
 
-Each entry records one flight session with all available metadata,
-including failures with stage information from debugger_tools.status.
+TWO ARTIFACTS PER SESSION
+--------------------------
+1. flight_history.log  — one human-readable line per flight, append-only.
+   Format:
+     Flight 012 | 22 April 2026 | 14:32:15 | test_altitude_validation.py |
+     TEST | Duration: 2m 18s | END: RC_KILL | Points: N/A | Mesh: N/A |
+     Bag: alt_validation_20260422_pid4821
 
-Log format (one line per flight):
-    Flight NNN | DD Month YYYY | HH:MM:SS | Duration: Xm Ys | Points: N | Status: OK/FAILED | Bag: scan_...
+2. sessions/<session_id>/flight_record.json  — structured JSON, written at arm
+   time and updated at disarm and postprocess. Safe to read at any point.
 
-Usage
------
-  # View full flight history
-  python3 flight_logger.py
+FLIGHT TYPES
+------------
+  TEST          — any script using CONTEXT_TEST (test_*.py scripts)
+  AUTONOMOUS    — main.py using CONTEXT_MISSION
+  MANUAL_SCAN   — drone_watchdog-managed scan (no mixin)
+  UNKNOWN       — fallback if caller does not specify
 
-  # View last N flights
-  python3 flight_logger.py --last 5
+CALL POINTS
+-----------
+  SafeFlightMixin.start_safety_monitors()  → open_session()   (arm event)
+  SafeFlightMixin._teardown()              → close_session()  (disarm event)
+  FlightStack.stop() in drone_watchdog     → open_session() + close_session()
+  postprocess_mesh.py                      → append_postprocess()
 
-  # View summary stats
-  python3 flight_logger.py --summary
+BACKWARD COMPATIBILITY
+----------------------
+The existing log_flight() and log_failure() signatures are preserved.
+postprocess_mesh.py does not need changes — it calls the same functions
+it always has. They now also update the session JSON if one exists.
 
-  # View only failures
-  python3 flight_logger.py --failures
-
-  # Called programmatically from postprocess_mesh.py:
-  from flight_logger import log_flight, log_failure
-  
-  # On success:
-  log_flight(
-      bag_name    = "scan_20260319_143215",
-      duration_s  = 272,
-      point_count = 47231,
-      mesh_faces  = 125000,
-      notes       = "DTM+DSM mode",
-  )
-  
-  # On failure (called by debugger_tools.status):
-  log_failure(
-      bag_name    = "scan_20260319_143215",
-      stage       = "dsm",
-      error       = "ValueError: Not enough points",
-      duration_s  = 45,
-      point_count = 12000,
-  )
+PUBLIC API SUMMARY
+------------------
+  open_session(session_id, script_name, flight_type, bag_path, context) -> int
+  close_session(session_id, end_reason, duration_s, bag_closed_cleanly)
+  append_postprocess(session_id, point_count, mesh_ok, mesh_faces,
+                     processing_duration_s, failure_stage, failure_error)
+  log_flight(...)     ← backward compat, calls open+close+append internally
+  log_failure(...)    ← backward compat
+  read_history(last_n) -> list[str]
+  get_summary()       -> dict
 """
 
 import argparse
+import json
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# ── config ────────────────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
-LOG_DIR      = Path.home() / "unitree_lidar_project" / "logs"
-HISTORY_FILE = LOG_DIR / "flight_history.log"
-COUNTER_FILE = LOG_DIR / ".flight_counter"   # hidden file tracking flight number
+LOG_DIR        = Path(os.environ.get(
+    "DRONEPI_LOG_DIR",
+    Path.home() / "unitree_lidar_project" / "logs"
+))
+HISTORY_FILE   = LOG_DIR / "flight_history.log"
+COUNTER_FILE   = LOG_DIR / ".flight_counter"
+SESSIONS_DIR   = LOG_DIR / "sessions"
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── Flight type constants ──────────────────────────────────────────────────────
 
-def _ensure_log_dir():
+FLIGHT_TYPE_TEST      = "TEST"
+FLIGHT_TYPE_AUTONOMUS = "AUTONOMOUS"
+FLIGHT_TYPE_MANUAL    = "MANUAL_SCAN"
+FLIGHT_TYPE_UNKNOWN   = "UNKNOWN"
+
+# Map SafeFlightMixin context strings to flight type labels
+_CONTEXT_TO_TYPE = {
+    "test":    FLIGHT_TYPE_TEST,
+    "mission": FLIGHT_TYPE_AUTONOMUS,
+}
+
+# ── Thread safety ──────────────────────────────────────────────────────────────
+_write_lock = threading.Lock()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTERNAL HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ensure_dirs() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _next_flight_number() -> int:
-    """
-    Return the next flight number and increment the counter.
-    Counter persists across reboots in .flight_counter file.
-    """
-    _ensure_log_dir()
-    if COUNTER_FILE.exists():
-        try:
-            n = int(COUNTER_FILE.read_text().strip())
-        except ValueError:
-            n = 0
-    else:
-        # First flight -- count existing entries to resume correctly
-        n = _count_existing_flights()
-    n += 1
-    COUNTER_FILE.write_text(str(n))
+    _ensure_dirs()
+    with _write_lock:
+        if COUNTER_FILE.exists():
+            try:
+                n = int(COUNTER_FILE.read_text().strip())
+            except ValueError:
+                n = _count_existing_flights()
+        else:
+            n = _count_existing_flights()
+        n += 1
+        COUNTER_FILE.write_text(str(n))
     return n
 
 
 def _count_existing_flights() -> int:
-    """Count existing flight entries so counter resumes correctly after reinstall."""
     if not HISTORY_FILE.exists():
         return 0
     count = 0
-    with open(HISTORY_FILE) as f:
-        for line in f:
-            if line.startswith("Flight "):
-                count += 1
+    try:
+        with open(HISTORY_FILE) as f:
+            for line in f:
+                if line.startswith("Flight "):
+                    count += 1
+    except OSError:
+        pass
     return count
 
 
-def _format_duration(duration_s: float) -> str:
-    """Format seconds as Xm Ys."""
-    if duration_s is None:
+def _fmt_duration(s: Optional[float]) -> str:
+    if s is None:
         return "N/A"
-    duration_s = int(duration_s)
-    m = duration_s // 60
-    s = duration_s % 60
-    if m > 0:
-        return f"{m}m {s:02d}s"
-    return f"{s}s"
+    s = int(s)
+    m, sec = divmod(s, 60)
+    return f"{m}m {sec:02d}s" if m else f"{sec}s"
 
 
-def _format_points(n: int) -> str:
-    """Format point count with thousands separator."""
-    if n is None:
-        return "N/A"
-    return f"{n:,}"
+def _fmt_points(n: Optional[int]) -> str:
+    return f"{n:,}" if n is not None else "N/A"
 
 
-def _format_date(dt: datetime) -> str:
-    """Format date as '19 March 2026'."""
+def _fmt_date(dt: datetime) -> str:
     return dt.strftime("%-d %B %Y")
 
 
-# ── public API ────────────────────────────────────────────────────────────────
+def _session_dir(session_id: str) -> Path:
+    d = SESSIONS_DIR / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _session_json_path(session_id: str) -> Path:
+    return _session_dir(session_id) / "flight_record.json"
+
+
+def _read_session(session_id: str) -> dict:
+    p = _session_json_path(session_id)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _write_session(session_id: str, record: dict) -> None:
+    p = _session_json_path(session_id)
+    try:
+        with _write_lock:
+            p.write_text(json.dumps(record, indent=2))
+    except Exception as exc:
+        print(f"[flight_logger] WARNING: could not write session JSON: {exc}")
+
+
+def _append_history_line(line: str) -> None:
+    _ensure_dirs()
+    with _write_lock:
+        with open(HISTORY_FILE, "a") as f:
+            f.write(line + "\n")
+
+
+def _build_history_line(record: dict) -> str:
+    """
+    Build the human-readable flight_history.log line from a session record.
+    All fields are right-padded for columnar alignment.
+    """
+    n           = record.get("flight_number", 0)
+    ts          = record.get("arm_time_iso", "")
+    script      = record.get("script_name", "unknown")
+    ftype       = record.get("flight_type", FLIGHT_TYPE_UNKNOWN)
+    duration    = _fmt_duration(record.get("duration_s"))
+    end_reason  = record.get("end_reason", "unknown")
+    points      = _fmt_points(record.get("point_count"))
+    mesh        = ("YES" if record.get("mesh_generated") else
+                   "NO"  if record.get("postprocess_ran") else "N/A")
+    bag         = record.get("session_id", "")
+
+    # Parse ISO timestamp for date/time display
+    try:
+        dt       = datetime.fromisoformat(ts)
+        date_str = _fmt_date(dt)
+        time_str = dt.strftime("%H:%M:%S")
+    except Exception:
+        date_str = "unknown date"
+        time_str = "??:??:??"
+
+    return (
+        f"Flight {n:03d} | "
+        f"{date_str} | "
+        f"{time_str} | "
+        f"{script:<35s} | "
+        f"{ftype:<12s} | "
+        f"Duration: {duration:>8s} | "
+        f"END: {end_reason:<22s} | "
+        f"Points: {points:>10s} | "
+        f"Mesh: {mesh:<3s} | "
+        f"Bag: {bag}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API — PRIMARY (new)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def open_session(
+    session_id:   str,
+    script_name:  str,
+    flight_type:  str,
+    bag_path:     Optional[str] = None,
+    context:      Optional[str] = None,
+    pid:          Optional[int] = None,
+) -> int:
+    """
+    Record the moment of arming. Call this as early as possible — before any
+    arming attempt. Returns the assigned flight number.
+
+    Parameters
+    ----------
+    session_id   : Unique session tag (e.g. "test_alt_20260422_143215_pid4821").
+                   Used as the key for sessions/<session_id>/flight_record.json.
+    script_name  : Basename of the calling script (__file__).
+    flight_type  : FLIGHT_TYPE_TEST, FLIGHT_TYPE_AUTONOMUS, FLIGHT_TYPE_MANUAL,
+                   or FLIGHT_TYPE_UNKNOWN.
+    bag_path     : Absolute path to the bag directory (may be None if bag not yet started).
+    context      : SafeFlightMixin context string ("test" or "mission") — used to
+                   override flight_type if flight_type is UNKNOWN.
+    pid          : PID of the calling process (optional, for cross-reference).
+    """
+    if context and flight_type == FLIGHT_TYPE_UNKNOWN:
+        flight_type = _CONTEXT_TO_TYPE.get(context, FLIGHT_TYPE_UNKNOWN)
+
+    flight_num = _next_flight_number()
+    now        = datetime.now()
+
+    record = {
+        "flight_number":   flight_num,
+        "session_id":      session_id,
+        "script_name":     script_name,
+        "flight_type":     flight_type,
+        "context":         context,
+        "pid":             pid or os.getpid(),
+        "arm_time_iso":    now.isoformat(),
+        "arm_time_unix":   now.timestamp(),
+        "bag_path":        bag_path,
+        "end_reason":      None,           # filled by close_session()
+        "disarm_time_iso": None,
+        "duration_s":      None,
+        "bag_closed_cleanly": None,
+        "postprocess_ran": False,
+        "point_count":     None,
+        "mesh_generated":  None,
+        "mesh_faces":      None,
+        "processing_duration_s": None,
+        "failure_stage":   None,
+        "failure_error":   None,
+    }
+
+    _write_session(session_id, record)
+    print(f"[flight_logger] Flight {flight_num:03d} opened — "
+          f"{script_name} ({flight_type})  session={session_id}")
+    return flight_num
+
+
+def close_session(
+    session_id:        str,
+    end_reason:        str,
+    duration_s:        Optional[float] = None,
+    bag_closed_cleanly: bool = True,
+    bag_path:          Optional[str] = None,
+) -> None:
+    """
+    Record the disarm/teardown event. Safe to call even if open_session()
+    was never called (creates a minimal record).
+
+    Parameters
+    ----------
+    session_id         : Must match the session_id passed to open_session().
+    end_reason         : How the flight ended. Examples:
+                           "normal"              clean land + disarm
+                           "RC_KILL_SWITCH"      CH7 fired
+                           "PILOT_OVERRIDE"      mode switch in test context
+                           "SETPOINT_WATCHDOG_STALE"
+                           "ERRATIC_ANGULAR_VELOCITY"
+                           "ALTITUDE_DEVIATION"
+                           "keyboard_interrupt"
+                           "arm_rejected"
+                           "offboard_set_failed"
+                           "manual_scan_disarm"  watchdog-managed scan
+    duration_s         : Seconds from arm to disarm.
+    bag_closed_cleanly : True if SIGINT to bag recorder completed within timeout.
+    bag_path           : Update bag path if not set at open time.
+    """
+    record = _read_session(session_id)
+    if not record:
+        # open_session() was never called — create a minimal stub record
+        flight_num   = _next_flight_number()
+        record = {
+            "flight_number": flight_num,
+            "session_id":    session_id,
+            "script_name":   "unknown",
+            "flight_type":   FLIGHT_TYPE_UNKNOWN,
+            "arm_time_iso":  None,
+            "arm_time_unix": None,
+            "postprocess_ran": False,
+        }
+
+    now = datetime.now()
+
+    # Compute duration from stored arm time if not provided
+    if duration_s is None and record.get("arm_time_unix"):
+        duration_s = now.timestamp() - record["arm_time_unix"]
+
+    record["end_reason"]         = end_reason
+    record["disarm_time_iso"]    = now.isoformat()
+    record["duration_s"]         = round(duration_s, 1) if duration_s else None
+    record["bag_closed_cleanly"] = bag_closed_cleanly
+    if bag_path:
+        record["bag_path"]       = bag_path
+
+    _write_session(session_id, record)
+
+    # Write the history line now that we have duration + end reason.
+    # If postprocess runs later it will update the JSON but NOT re-write
+    # the history line (that would cause duplicates). The history line
+    # is written once at close time with whatever is known then.
+    line = _build_history_line(record)
+    _append_history_line(line)
+    print(f"[flight_logger] Flight {record['flight_number']:03d} closed — "
+          f"reason={end_reason}  duration={_fmt_duration(duration_s)}")
+
+
+def append_postprocess(
+    session_id:           str,
+    point_count:          Optional[int]   = None,
+    mesh_ok:              bool            = False,
+    mesh_faces:           Optional[int]   = None,
+    processing_duration_s: Optional[float] = None,
+    failure_stage:        Optional[str]   = None,
+    failure_error:        Optional[str]   = None,
+) -> None:
+    """
+    Append post-processing results to an existing session record.
+    Updates the JSON only — does NOT write another history line.
+    Safe to call even if no session JSON exists (silently returns).
+
+    Called by postprocess_mesh.py after processing completes or fails.
+    """
+    record = _read_session(session_id)
+    if not record:
+        # No session was opened (e.g. very old bag, or manual CLI reprocess).
+        # Silently skip — don't create a phantom record.
+        print(f"[flight_logger] append_postprocess: no session record for "
+              f"'{session_id}' — skipping JSON update")
+        return
+
+    record["postprocess_ran"]        = True
+    record["point_count"]            = point_count
+    record["mesh_generated"]         = mesh_ok
+    record["mesh_faces"]             = mesh_faces
+    record["processing_duration_s"]  = (
+        round(processing_duration_s, 1) if processing_duration_s else None
+    )
+    record["failure_stage"]  = failure_stage
+    record["failure_error"]  = failure_error
+
+    _write_session(session_id, record)
+    status = "success" if not failure_stage else f"FAILED at {failure_stage}"
+    print(f"[flight_logger] Flight {record.get('flight_number', '?'):03d} "
+          f"postprocess appended — {status}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API — BACKWARD COMPAT (existing callers unchanged)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def log_flight(
     bag_name:    str,
     duration_s:  float,
     point_count: int,
+    mesh_ok:     bool  = True,
     mesh_faces:  Optional[int] = None,
-    mesh_ok:     bool = True,
-    notes:       str = "",
+    notes:       str   = "",
 ) -> int:
     """
-    Append one successful flight entry to the history log.
+    Backward-compatible entry point. Called by postprocess_mesh.py on success.
 
-    Parameters
-    ----------
-    bag_name    : session directory name e.g. 'scan_20260319_143215'
-    duration_s  : recording duration in seconds
-    point_count : total points in the processed cloud
-    mesh_faces  : number of faces in final mesh (optional)
-    mesh_ok     : True if mesh was generated (default True)
-    notes       : optional free-text notes (mode, issues, etc.)
+    Tries to find an existing session record for bag_name and append postprocess
+    results to it. If no record exists (old-style bag or watchdog-only session
+    that never called open_session), creates a complete record directly.
 
-    Returns
-    -------
-    Flight number assigned to this session.
+    Returns the flight number.
     """
-    _ensure_log_dir()
+    session_id = bag_name
 
-    now        = datetime.now()
-    flight_num = _next_flight_number()
-    date_str   = _format_date(now)
-    time_str   = now.strftime("%H:%M:%S")
-    dur_str    = _format_duration(duration_s)
-    pts_str    = _format_points(point_count)
-    
-    # Status field
-    if mesh_ok and mesh_faces:
-        status_str = f"OK ({mesh_faces:,} faces)"
-    elif mesh_ok:
-        status_str = "OK"
-    else:
-        status_str = "CLOUD ONLY"
-    
-    notes_part = f" | {notes}" if notes else ""
+    # Try to append to an existing session opened by the mixin or watchdog
+    existing = _read_session(session_id)
+    if existing:
+        append_postprocess(
+            session_id            = session_id,
+            point_count           = point_count,
+            mesh_ok               = mesh_ok,
+            mesh_faces            = mesh_faces,
+            processing_duration_s = None,
+        )
+        return existing.get("flight_number", 0)
 
-    line = (
-        f"Flight {flight_num:03d} | "
-        f"{date_str} | "
-        f"{time_str} | "
-        f"Duration: {dur_str:>8s} | "
-        f"Points: {pts_str:>10s} | "
-        f"Status: {status_str:<20s} | "
-        f"Bag: {bag_name}"
-        f"{notes_part}\n"
+    # No existing session — create a complete record (backward compat path)
+    flight_num = open_session(
+        session_id  = session_id,
+        script_name = "postprocess_mesh.py",
+        flight_type = FLIGHT_TYPE_UNKNOWN,
+        bag_path    = str(bag_name),
     )
-
-    with open(HISTORY_FILE, "a") as f:
-        f.write(line)
-
-    print(f"[flight_logger] Flight {flight_num:03d} logged → {HISTORY_FILE}")
+    close_session(
+        session_id  = session_id,
+        end_reason  = "postprocess_only",
+        duration_s  = duration_s,
+    )
+    append_postprocess(
+        session_id  = session_id,
+        point_count = point_count,
+        mesh_ok     = mesh_ok,
+        mesh_faces  = mesh_faces,
+    )
     return flight_num
 
 
@@ -187,201 +446,146 @@ def log_failure(
     stage:       str,
     error:       str,
     duration_s:  Optional[float] = None,
-    point_count: Optional[int] = None,
+    point_count: Optional[int]   = None,
 ) -> int:
     """
-    Append one failed flight entry to the history log.
-    
-    Called by debugger_tools.status.write_failure_status() when
-    the pipeline crashes at any stage.
-
-    Parameters
-    ----------
-    bag_name    : session directory name e.g. 'scan_20260319_143215'
-    stage       : pipeline stage where failure occurred (e.g., 'dsm', 'mls')
-    error       : error message (truncated if too long)
-    duration_s  : time elapsed before failure (optional)
-    point_count : points processed before failure (optional)
-
-    Returns
-    -------
-    Flight number assigned to this session.
+    Backward-compatible entry point. Called by debugger_tools/status.py on failure.
     """
-    _ensure_log_dir()
+    session_id = bag_name
+    existing   = _read_session(session_id)
 
-    now        = datetime.now()
-    flight_num = _next_flight_number()
-    date_str   = _format_date(now)
-    time_str   = now.strftime("%H:%M:%S")
-    dur_str    = _format_duration(duration_s) if duration_s else "N/A"
-    pts_str    = _format_points(point_count) if point_count else "N/A"
-    
-    # Truncate error message if too long
-    error_short = error[:50] + "..." if len(error) > 50 else error
-    status_str = f"FAILED @ {stage}"
+    if existing:
+        append_postprocess(
+            session_id     = session_id,
+            point_count    = point_count,
+            mesh_ok        = False,
+            failure_stage  = stage,
+            failure_error  = error,
+        )
+        return existing.get("flight_number", 0)
 
-    line = (
-        f"Flight {flight_num:03d} | "
-        f"{date_str} | "
-        f"{time_str} | "
-        f"Duration: {dur_str:>8s} | "
-        f"Points: {pts_str:>10s} | "
-        f"Status: {status_str:<20s} | "
-        f"Bag: {bag_name} | "
-        f"Error: {error_short}\n"
+    flight_num = open_session(
+        session_id  = session_id,
+        script_name = "postprocess_mesh.py",
+        flight_type = FLIGHT_TYPE_UNKNOWN,
+        bag_path    = str(bag_name),
     )
-
-    with open(HISTORY_FILE, "a") as f:
-        f.write(line)
-
-    print(f"[flight_logger] Flight {flight_num:03d} (FAILED) logged → {HISTORY_FILE}")
+    close_session(
+        session_id  = session_id,
+        end_reason  = f"postprocess_failed:{stage}",
+        duration_s  = duration_s,
+    )
+    append_postprocess(
+        session_id    = session_id,
+        point_count   = point_count,
+        mesh_ok       = False,
+        failure_stage = stage,
+        failure_error = error,
+    )
     return flight_num
 
 
-def read_history(last_n: int = None, failures_only: bool = False) -> list[str]:
-    """
-    Read flight history entries.
+# ══════════════════════════════════════════════════════════════════════════════
+# READ / QUERY API
+# ══════════════════════════════════════════════════════════════════════════════
 
-    Parameters
-    ----------
-    last_n : if set, return only the last N entries
-    failures_only : if True, return only failed flights
-
-    Returns
-    -------
-    List of log line strings (without newline).
-    """
+def read_history(last_n: Optional[int] = None) -> list:
     if not HISTORY_FILE.exists():
         return []
-    with open(HISTORY_FILE) as f:
-        lines = [l.rstrip() for l in f if l.startswith("Flight ")]
-    
-    if failures_only:
-        lines = [l for l in lines if "FAILED" in l]
-    
-    if last_n is not None:
-        lines = lines[-last_n:]
-    return lines
+    try:
+        with open(HISTORY_FILE) as f:
+            lines = [l.rstrip() for l in f if l.startswith("Flight ")]
+    except OSError:
+        return []
+    return lines[-last_n:] if last_n else lines
+
+
+def read_session_record(session_id: str) -> Optional[dict]:
+    """Return the full structured record for a session, or None."""
+    r = _read_session(session_id)
+    return r if r else None
 
 
 def get_summary() -> dict:
-    """
-    Return summary statistics across all logged flights.
+    lines = read_history()
+    total = len(lines)
+    if not total:
+        return {"total": 0}
 
-    Returns
-    -------
-    dict with keys: total_flights, total_points, success_count,
-                    failed_count, cloud_only_count, total_duration_s
-    """
-    lines         = read_history()
-    total_pts     = 0
-    success_count = 0
-    failed_count  = 0
-    cloud_only    = 0
-    total_dur     = 0
-
+    by_type: dict = {}
+    end_reasons:  dict = {}
     for line in lines:
-        # Parse points
-        try:
-            pts_part = [p for p in line.split("|") if "Points:" in p][0]
-            pts_str = pts_part.strip().replace("Points:", "").replace(",", "").strip()
-            if pts_str != "N/A":
-                total_pts += int(pts_str)
-        except (IndexError, ValueError):
-            pass
-
-        # Parse status
-        try:
-            status_part = [p for p in line.split("|") if "Status:" in p][0]
-            if "FAILED" in status_part:
-                failed_count += 1
-            elif "CLOUD ONLY" in status_part:
-                cloud_only += 1
-            elif "OK" in status_part:
-                success_count += 1
-        except IndexError:
-            pass
-
-        # Parse duration
-        try:
-            dur_part = [p for p in line.split("|") if "Duration:" in p][0]
-            dur_str  = dur_part.strip().replace("Duration:", "").strip()
-            if dur_str != "N/A":
-                secs = 0
-                if "m" in dur_str:
-                    parts = dur_str.split("m")
-                    secs += int(parts[0].strip()) * 60
-                    secs += int(parts[1].replace("s", "").strip())
-                else:
-                    secs += int(dur_str.replace("s", "").strip())
-                total_dur += secs
-        except (IndexError, ValueError):
-            pass
+        parts = {p.strip() for p in line.split("|")}
+        # Count by flight type
+        for ftype in (FLIGHT_TYPE_TEST, FLIGHT_TYPE_AUTONOMUS,
+                      FLIGHT_TYPE_MANUAL, FLIGHT_TYPE_UNKNOWN):
+            if ftype in parts:
+                by_type[ftype] = by_type.get(ftype, 0) + 1
 
     return {
-        "total_flights":    len(lines),
-        "total_points":     total_pts,
-        "success_count":    success_count,
-        "failed_count":     failed_count,
-        "cloud_only_count": cloud_only,
-        "total_duration_s": total_dur,
+        "total":   total,
+        "by_type": by_type,
     }
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+def list_sessions() -> list:
+    """Return list of all session IDs that have a flight_record.json."""
+    if not SESSIONS_DIR.exists():
+        return []
+    return sorted(
+        p.parent.name
+        for p in SESSIONS_DIR.glob("*/flight_record.json")
+    )
 
-def main():
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLI
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _cli_print(lines: list) -> None:
+    if not lines:
+        print("No flight records found.")
+        return
+    for line in lines:
+        print(line)
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="View DronePi flight history log.")
-    parser.add_argument("--last", type=int, default=None,
-                        help="Show only the last N flights")
-    parser.add_argument("--summary", action="store_true",
-                        help="Show summary statistics")
-    parser.add_argument("--failures", action="store_true",
-                        help="Show only failed flights")
+        description="DronePi flight history viewer"
+    )
+    parser.add_argument("--last",     type=int,  help="Show last N flights")
+    parser.add_argument("--summary",  action="store_true", help="Summary statistics")
+    parser.add_argument("--failures", action="store_true", help="Show failed flights only")
+    parser.add_argument("--session",  type=str,  help="Show full JSON for a session ID")
+    parser.add_argument("--sessions", action="store_true", help="List all session IDs")
     args = parser.parse_args()
 
-    if not HISTORY_FILE.exists():
-        print(f"No flight history yet.")
-        print(f"Log will be created at: {HISTORY_FILE}")
-        print("Entries are added automatically after each flight is processed.")
+    if args.session:
+        record = read_session_record(args.session)
+        if record:
+            print(json.dumps(record, indent=2))
+        else:
+            print(f"No record found for session: {args.session}")
+        return
+
+    if args.sessions:
+        for s in list_sessions():
+            print(s)
         return
 
     if args.summary:
         s = get_summary()
-        total_h = s["total_duration_s"] // 3600
-        total_m = (s["total_duration_s"] % 3600) // 60
-        total_s = s["total_duration_s"] % 60
-        print("=" * 60)
-        print("  DronePi Flight History — Summary")
-        print("=" * 60)
-        print(f"  Total flights    : {s['total_flights']}")
-        print(f"  Successful       : {s['success_count']}")
-        print(f"  Failed           : {s['failed_count']}")
-        print(f"  Cloud only       : {s['cloud_only_count']}")
-        print(f"  Total airtime    : {total_h}h {total_m}m {total_s}s")
-        print(f"  Total points     : {s['total_points']:,}")
-        print(f"  Log file         : {HISTORY_FILE}")
-        print("=" * 60)
+        print(f"Total flights: {s['total']}")
+        for ftype, count in s.get("by_type", {}).items():
+            print(f"  {ftype}: {count}")
         return
 
-    entries = read_history(args.last, failures_only=args.failures)
-    if not entries:
-        if args.failures:
-            print("No failed flights found. 🎉")
-        else:
-            print("No flight entries found.")
-        return
-
-    label = "failed" if args.failures else f"last {args.last}" if args.last else "all"
-    print("=" * 90)
-    print(f"  DronePi Flight History ({label} flights)")
-    print("=" * 90)
-    for entry in entries:
-        print(f"  {entry}")
-    print("=" * 90)
-    print(f"  Log file: {HISTORY_FILE}")
-    print("=" * 90)
+    lines = read_history(last_n=args.last)
+    if args.failures:
+        lines = [l for l in lines if "FAIL" in l or "CRASH" in l
+                 or "RC_KILL" in l or "OVERRIDE" in l or "WATCHDOG" in l]
+    _cli_print(lines)
 
 
 if __name__ == "__main__":

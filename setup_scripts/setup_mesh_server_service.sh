@@ -1,57 +1,92 @@
 #!/bin/bash
-# =============================================================================
-# scripts/setup_mesh_server_service.sh
-# Installs serve.py and meshview.html to /mnt/ssd/maps/ and registers
-# the drone-mesh-server systemd service.
-# Called by setup.sh or run standalone: sudo bash scripts/setup_mesh_server_service.sh
-# =============================================================================
-set -euo pipefail
+# ─────────────────────────────────────────────────────────────────────────────
+# setup_mesh_server_service.sh
+# Installs serve.py and dronepi_viewer_ultimate.html to /mnt/ssd/maps/ and registers
+# the drone-mesh-server systemd service to auto-start on boot.
+#
+# Run once with sudo:
+#   sudo bash setup_mesh_server_service.sh
+# ─────────────────────────────────────────────────────────────────────────────
 
-SERVICE="drone-mesh-server"
+set -e
+
 MAPS_DIR="/mnt/ssd/maps"
-DRONEPI_USER="dronepi"
+SERVICE="drone-mesh-server"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-SERVER_SRC="$PROJECT_DIR/rpi_server"
 
-[[ $EUID -ne 0 ]] && { echo "[ERROR] Run with sudo."; exit 1; }
+echo "======================================================="
+echo "  Drone Mesh Server Service Setup"
+echo "======================================================="
 
-echo "[mesh-server] Checking SSD mount..."
+# ── 1. Verify SSD is mounted ──────────────────────────────────────────────────
+echo ""
+echo "[1/5] Checking SSD mount..."
 if ! mountpoint -q /mnt/ssd; then
-    echo "[mesh-server] WARN: /mnt/ssd is not mounted. Service will be installed"
-    echo "              but will fail to start until SSD is mounted and fstab is set."
+    echo "  [FAIL] /mnt/ssd is not mounted."
+    echo "  Mount the SSD first: sudo mount -a"
+    exit 1
 fi
+echo "  [OK] SSD mounted at /mnt/ssd"
 
-echo "[mesh-server] Setting up $MAPS_DIR..."
+# ── 2. Create maps directory and copy files ───────────────────────────────────
+echo ""
+echo "[2/5] Setting up /mnt/ssd/maps/..."
 mkdir -p "$MAPS_DIR"
 
-for f in serve.py meshview.html local_test.html; do
-    if [[ -f "$SERVER_SRC/$f" ]]; then
-        cp "$SERVER_SRC/$f" "$MAPS_DIR/$f"
-        echo "[mesh-server] Copied $f"
-    else
-        echo "[mesh-server] WARN: $f not found at $SERVER_SRC/$f — skipping"
-    fi
-done
+# Copy serve.py
+if [ -f "$SCRIPT_DIR/serve.py" ]; then
+    cp "$SCRIPT_DIR/serve.py" "$MAPS_DIR/serve.py"
+    chmod +x "$MAPS_DIR/serve.py"
+    echo "  [OK] serve.py copied"
+else
+    echo "  [FAIL] serve.py not found at $SCRIPT_DIR/serve.py"
+    exit 1
+fi
 
-chown -R "$DRONEPI_USER:$DRONEPI_USER" "$MAPS_DIR"
+# Copy dronepi_viewer_ultimate.html (unified ground station)
+if [ -f "$SCRIPT_DIR/dronepi_viewer_ultimate.html" ]; then
+    cp "$SCRIPT_DIR/dronepi_viewer_ultimate.html" "$MAPS_DIR/dronepi_viewer_ultimate.html"
+    echo "  [OK] dronepi_viewer_ultimate.html copied"
+else
+    echo "  [FAIL] dronepi_viewer_ultimate.html not found at $SCRIPT_DIR/dronepi_viewer_ultimate.html"
+    exit 1
+fi
 
-echo "[mesh-server] Writing service file..."
-tee /etc/systemd/system/${SERVICE}.service > /dev/null <<UNIT
+# Set ownership
+chown -R dronepi:dronepi "$MAPS_DIR"
+echo "  [OK] Ownership set to dronepi"
+
+# ── 3. Open firewall port ─────────────────────────────────────────────────────
+echo ""
+echo "[3/5] Configuring firewall..."
+if command -v ufw &>/dev/null; then
+    ufw allow 8080/tcp 2>/dev/null || true
+    echo "  [OK] UFW: port 8080 allowed"
+else
+    echo "  [SKIP] UFW not found — skipping firewall config"
+fi
+
+# ── 4. Create systemd service ─────────────────────────────────────────────────
+echo ""
+echo "[4/5] Creating systemd service..."
+
+cat > /etc/systemd/system/${SERVICE}.service << UNIT
 [Unit]
-Description=Drone Mesh HTTP Server — port 8080
+Description=Drone Mesh HTTP Server (port 8080)
+Documentation=http://10.42.0.1:8080/dronepi_viewer_ultimate.html
+# Wait for SSD to be mounted and hotspot to be up
 After=mnt-ssd.mount dronepi-hotspot.service
 Wants=mnt-ssd.mount dronepi-hotspot.service
-RequiresMountsFor=/mnt/ssd
 
 [Service]
 Type=simple
-User=${DRONEPI_USER}
+User=dronepi
 WorkingDirectory=/mnt/ssd/maps
-ExecStartPre=/bin/mountpoint -q /mnt/ssd
 ExecStart=/usr/bin/python3 /mnt/ssd/maps/serve.py
 Restart=on-failure
 RestartSec=5
+
+# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=drone-mesh-server
@@ -60,21 +95,41 @@ SyslogIdentifier=drone-mesh-server
 WantedBy=multi-user.target
 UNIT
 
+echo "  [OK] Service file written"
+
+# ── 5. Enable and start ───────────────────────────────────────────────────────
+echo ""
+echo "[5/5] Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable ${SERVICE}.service
+systemctl start ${SERVICE}.service
 
-# Only start if SSD is mounted
-if mountpoint -q /mnt/ssd; then
-    systemctl restart ${SERVICE}.service
-    sleep 2
-    STATUS=$(systemctl is-active ${SERVICE}.service)
-    if [[ "$STATUS" == "active" ]]; then
-        echo "[mesh-server] Service active — http://10.42.0.1:8080/meshview.html"
-    else
-        echo "[mesh-server] WARN: Service status is $STATUS"
-        echo "              Check: sudo journalctl -u ${SERVICE} -n 30"
-    fi
+sleep 2
+
+STATUS=$(systemctl is-active ${SERVICE}.service)
+if [ "$STATUS" = "active" ]; then
+    echo "  [OK] Service is active"
 else
-    echo "[mesh-server] Service installed but not started (SSD not mounted)."
-    echo "              It will start automatically after reboot with SSD connected."
+    echo "  [WARN] Service status: $STATUS"
+    echo "  Check: sudo journalctl -u ${SERVICE} -n 30"
 fi
+
+echo ""
+echo "======================================================="
+echo "  Mesh server setup complete."
+echo "======================================================="
+echo ""
+echo "  Serving from : $MAPS_DIR"
+echo "  Viewer URL   : http://10.42.0.1:8080/dronepi_viewer_ultimate.html"
+echo ""
+echo "  Service commands:"
+echo "    sudo systemctl status ${SERVICE}"
+echo "    sudo systemctl restart ${SERVICE}"
+echo "    sudo journalctl -u ${SERVICE} -f"
+echo ""
+echo "  To test the viewer:"
+echo "    1. Connect laptop to dronepi-ap Wi-Fi"
+echo "    2. Open: http://10.42.0.1:8080/dronepi_viewer_ultimate.html"
+echo "    3. Viewer shows 'WAITING FOR OUTPUT' on 3D tab"
+echo "    4. Copy a PLY + write latest.json to trigger auto-load"
+echo ""

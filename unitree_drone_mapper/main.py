@@ -43,11 +43,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from flight.preflight_checks import PreflightChecker
+from flight.waypoint_validator import WaypointValidator
+from flight.gps_reader import GpsReader
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -295,8 +299,16 @@ class MainNode(SafeFlightMixin, Node):
                 timeout=3, capture_output=True,
             )
             log("Camera triggered.")
+            self._log_event("CAMERA_TRIGGER", {
+                "actual_enu": [
+                    round(self.local_x, 2),
+                    round(self.local_y, 2),
+                    round(self.local_z, 2),
+                ],
+            })
         except Exception as exc:
             log(f"Camera trigger failed: {exc}")
+            self._log_event("CAMERA_TRIGGER_FAILED", {"error": str(exc)})
 
     # ── Main handle_autonomous ────────────────────────────────────────────────
 
@@ -314,51 +326,123 @@ class MainNode(SafeFlightMixin, Node):
         """
         log(f"handle_autonomous: {len(self._waypoints)} waypoints.")
         self.write_main_status("autonomous_running")
+        self._log_event("TAKEOFF", {
+            "waypoint_count": len(self._waypoints),
+            "first_target_enu": [
+                round(self._waypoints[0][0], 2),
+                round(self._waypoints[0][1], 2),
+                round(self._waypoints[0][2], 2),
+            ] if self._waypoints else None,
+        })
 
-        for i, (ex, ey, ez) in enumerate(self._waypoints):
-            # ── CONTEXT_MISSION pause window check ───────────────────────────
-            # The mixin's _rc_override_monitor sets these booleans.
-            # We poll here instead of managing OFFBOARD recovery ourselves.
-            if self._offboard_aborted:
-                log("Mission aborted by mixin (AUTO.RTL commanded). Exiting loop.")
-                return False
+        # ── SLAM staleness tracking ───────────────────────────────────────────
+        # If Point-LIO stops publishing mid-flight, the SLAM bridge keeps
+        # forwarding the last known pose indefinitely. EKF2 believes the drone
+        # is holding position while it physically drifts. Detect this by
+        # monitoring /aft_mapped_to_init freshness and commanding AUTO.LAND
+        # if the topic goes silent beyond SLAM_STALE_S.
+        # Source: Point-LIO /aft_mapped_to_init, nav_msgs/Odometry, ~10 Hz
+        _SLAM_STALE_S = float(os.environ.get("SLAM_STALE_S", "5.0"))
+        _slam_last_t: list[float] = [time.monotonic()]
 
-            if self._offboard_pause_active:
-                log("OFFBOARD pause active — waiting for mixin resolution...")
-                while self._offboard_pause_active and not self._teardown_called:
-                    time.sleep(0.5)
+        def _slam_live_cb(_msg) -> None:
+            _slam_last_t[0] = time.monotonic()
+
+        from nav_msgs.msg import Odometry as _OdomMsg
+        from rclpy.qos import QoSProfile as _QoSProfile
+        from rclpy.qos import ReliabilityPolicy as _Rel, HistoryPolicy as _Hist
+        _slam_live_sub = self.create_subscription(
+            _OdomMsg, "/aft_mapped_to_init", _slam_live_cb,
+            _QoSProfile(reliability=_Rel.BEST_EFFORT,
+                        history=_Hist.KEEP_LAST, depth=5),
+        )
+
+        try:
+            for i, (ex, ey, ez) in enumerate(self._waypoints):
+                # ── CONTEXT_MISSION pause window check ───────────────────────
                 if self._offboard_aborted:
-                    log("Mixin resolved: aborted. Exiting loop.")
+                    log("Mission aborted by mixin (AUTO.RTL commanded). Exiting loop.")
                     return False
-                log(f"Mixin resolved: resuming from waypoint {i+1}.")
 
-            if self._pilot_override:
-                return False
+                if self._offboard_pause_active:
+                    log("OFFBOARD pause active — waiting for mixin resolution...")
+                    while self._offboard_pause_active and not self._teardown_called:
+                        time.sleep(0.5)
+                    if self._offboard_aborted:
+                        log("Mixin resolved: aborted. Exiting loop.")
+                        return False
+                    log(f"Mixin resolved: resuming from waypoint {i+1}.")
 
-            # ── Fly to waypoint ───────────────────────────────────────────────
-            log(f"Waypoint {i+1}/{len(self._waypoints)}: "
-                f"ENU=({ex:.1f}, {ey:.1f}, {ez:.1f})")
-            self.write_main_status(f"wp_{i+1}_of_{len(self._waypoints)}")
+                if self._pilot_override:
+                    return False
 
-            if not self.fly_to(ex, ey, ez):
-                log(f"Waypoint {i+1} not reached (override or abort).")
-                return False
+                # ── SLAM staleness check ──────────────────────────────────────
+                _slam_age = time.monotonic() - _slam_last_t[0]
+                if _slam_age > _SLAM_STALE_S:
+                    log(
+                        f"CRITICAL: No Point-LIO output for {_slam_age:.1f}s "
+                        f"(limit {_SLAM_STALE_S:.1f}s). "
+                        "EKF2 position frozen. Commanding AUTO.LAND."
+                    )
+                    self._log_event("SLAM_STALE_LAND",
+                                    {"stale_s": round(_slam_age, 1)})
+                    self.set_mode("AUTO.LAND")
+                    return False
 
-            log(f"  Waypoint {i+1} reached.")
+                # ── Fly to waypoint ───────────────────────────────────────────
+                log(f"Waypoint {i+1}/{len(self._waypoints)}: "
+                    f"ENU=({ex:.1f}, {ey:.1f}, {ez:.1f})")
+                self.write_main_status(f"wp_{i+1}_of_{len(self._waypoints)}")
+                self._log_event("WAYPOINT_DISPATCH", {
+                    "wp_index":   i + 1,
+                    "wp_total":   len(self._waypoints),
+                    "target_enu": [round(ex, 2), round(ey, 2), round(ez, 2)],
+                })
 
-            # ── Camera trigger at waypoint ────────────────────────────────────
-            self.trigger_camera()
+                if not self.fly_to(ex, ey, ez):
+                    log(f"Waypoint {i+1} not reached (override or abort).")
+                    self._log_event("WAYPOINT_ABORTED", {
+                        "wp_index": i + 1,
+                        "actual_enu": [
+                            round(self.local_x, 2),
+                            round(self.local_y, 2),
+                            round(self.local_z, 2),
+                        ],
+                    })
+                    return False
 
-        log("All waypoints complete.")
-        return True
+                log(f"  Waypoint {i+1} reached.")
+                self._log_event("WAYPOINT_REACHED", {
+                    "wp_index":  i + 1,
+                    "actual_enu": [
+                        round(self.local_x, 2),
+                        round(self.local_y, 2),
+                        round(self.local_z, 2),
+                    ],
+                    "pos_error_m": round(
+                        ((self.local_x - ex)**2 +
+                         (self.local_y - ey)**2 +
+                         (self.local_z - ez)**2) ** 0.5, 3
+                    ),
+                })
+
+                # ── Camera trigger at waypoint ────────────────────────────────
+                self.trigger_camera()
+
+            log("All waypoints complete.")
+            return True
+
+        finally:
+            self.destroy_subscription(_slam_live_sub)
 
     # ── Full mission run ──────────────────────────────────────────────────────
 
     def run(self) -> bool:
         """
         Full mission sequence:
-          start_safety_monitors → Point-LIO → SLAM bridge → arm →
-          OFFBOARD → handle_autonomous → AUTO.LAND → postflight
+          start_safety_monitors → Point-LIO → SLAM bridge →
+          preflight checks (3a) → waypoint validation (3b) →
+          warmup → OFFBOARD + arm → handle_autonomous → AUTO.LAND → postflight
         """
 
         # ── 1. Safety monitors (bag recorder + lock + all monitors) ───────────
@@ -368,6 +452,10 @@ class MainNode(SafeFlightMixin, Node):
         if self._pilot_override:
             log("ERROR: Pilot override active before arm. Aborting.")
             return False
+
+        # Export session directory so subprocesses (collision_monitor, etc.)
+        # can append to the same flight_events.json without a shared reference.
+        os.environ["DRONEPI_SESSION_DIR"] = str(self._session_dir)
 
         # ── 2. Subprocesses ───────────────────────────────────────────────────
         if not self.start_pointlio():
@@ -387,6 +475,55 @@ class MainNode(SafeFlightMixin, Node):
             log("ERROR: MAVROS timeout.")
             self._teardown("mavros_timeout")
             return False
+
+        # ── 3a. Preflight checks ──────────────────────────────────────────────
+        # PreflightChecker runs three independent gates in sequence:
+        #   1. stale_lock      — clears dead-PID lock from prior session
+        #   2. ssd_mount       — verifies /mnt/ssd is mounted with free space
+        #   3. slam_convergence — confirms Point-LIO is publishing before arm
+        # All fatal failures abort here before any setpoint or arm call.
+        _pfc = PreflightChecker(
+            node=self,
+            spin_fn=lambda: rclpy.spin_once(self, timeout_sec=0.5),
+            log_event_fn=self._log_event,
+        )
+        for _result in _pfc.run_all():
+            if _result.passed:
+                if _result.reason != "ok":
+                    log(f"PREFLIGHT [{_result.check}] WARNING: {_result.reason} "
+                        f"{_result.detail}")
+                else:
+                    log(f"PREFLIGHT [{_result.check}] OK  {_result.detail}")
+            else:
+                log(f"PREFLIGHT [{_result.check}] FAILED: {_result.reason} "
+                    f"{_result.detail}")
+                if _result.fatal:
+                    self._teardown(f"preflight_{_result.check}_failed")
+                    return False
+
+        # ── 3b. Waypoint validation ───────────────────────────────────────────
+        _gps = GpsReader()
+        _gps.start()
+
+        _vr = WaypointValidator(_gps, max_radius_m=float(
+            os.environ.get("WAYPOINT_MAX_RADIUS_M", "200.0")
+        ))
+        _val_result = _vr.check(self._waypoints)
+
+        if not _val_result.passed:
+            log(
+                f"ERROR: Waypoint validation FAILED — {_val_result.reason}. "
+                f"Offending waypoint index: {_val_result.offending_index}, "
+                f"radius: {_val_result.offending_radius_m} m. Aborting pre-arm."
+            )
+            _gps.stop()
+            self._teardown("waypoint_validation_failed")
+            return False
+
+        if _val_result.skipped:
+            log(f"WARNING: Waypoint validation skipped — {_val_result.reason}. Proceeding.")
+
+        _gps.stop()
 
         # ── 4. Warmup setpoints ───────────────────────────────────────────────
         log(f"Setpoint warmup ({WARMUP_S}s)...")
@@ -412,6 +549,11 @@ class MainNode(SafeFlightMixin, Node):
             return False
 
         log("Armed and in OFFBOARD. Starting mission.")
+        self._log_event("ARMED", {
+            "pointlio_pid":    self._pointlio_proc.pid if self._pointlio_proc else None,
+            "slam_bridge_pid": self._slam_bridge_proc.pid if self._slam_bridge_proc else None,
+            "waypoint_count":  len(self._waypoints),
+        })
 
         success = False
         try:
@@ -421,6 +563,14 @@ class MainNode(SafeFlightMixin, Node):
             # ── 6. Land (always) ──────────────────────────────────────────────
             if self.armed and not self._teardown_called:
                 log("Landing...")
+                self._log_event("LANDING", {
+                    "reason":     "mission_complete" if success else "mission_aborted",
+                    "actual_enu": [
+                        round(self.local_x, 2),
+                        round(self.local_y, 2),
+                        round(self.local_z, 2),
+                    ],
+                })
                 self.set_mode("AUTO.LAND")
                 t0 = time.monotonic()
                 while self.armed and time.monotonic() - t0 < 45.0:

@@ -109,6 +109,40 @@ RELIABLE_QOS = QoSProfile(
     depth=10,
 )
 
+# ── Shared flight event log writer ────────────────────────────────────────────
+import json, os
+
+class _FlightEventWriter:
+    """Appends structured events to the session flight_events.json.
+    Path injected via DRONEPI_SESSION_DIR env var set by main.py before launch.
+    Non-fatal: any write error is silently swallowed.
+    """
+    def __init__(self):
+        session_dir = os.environ.get("DRONEPI_SESSION_DIR", "")
+        self._path = (Path(session_dir) / "flight_events.json") if session_dir else None
+
+    def write(self, event_type: str, extra: dict) -> None:
+        if self._path is None:
+            return
+        try:
+            now = time.time()
+            entry = {
+                "t_s":        round(now, 3),
+                "ts_iso":     datetime.fromtimestamp(now).isoformat(),
+                "event_type": event_type,
+                "source":     "collision_monitor",
+            }
+            entry.update(extra)
+            existing = []
+            if self._path.exists():
+                try:
+                    existing = json.loads(self._path.read_text())
+                except Exception:
+                    pass
+            existing.append(entry)
+            self._path.write_text(json.dumps(existing, indent=2))
+        except Exception:
+            pass
 
 class CollisionMonitor(Node):
     """Three-zone proximity monitor and downward AGL estimator.
@@ -125,12 +159,14 @@ class CollisionMonitor(Node):
 
         # Shared state protected by lock
         # Sector distances in metres, float('inf') = no obstacle detected
+        self._event_writer = _FlightEventWriter()
         self._sectors    = [float('inf')] * NUM_SECTORS
         self._zone       = "CLEAR"
         self._agl_m      = None
         self._lock       = threading.Lock()
         self._last_cloud = 0.0
         self._last_log   = 0.0
+        self._last_zone = "CLEAR"
 
         # Subscriptions
         self._cloud_sub = self.create_subscription(

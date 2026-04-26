@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DronePi · Unified Ground Station</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="/leaflet.min.css">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -65,39 +65,7 @@
   .hbtn.active { border-color: #4a9eff; color: #4a9eff; background: rgba(74,158,255,0.08); }
   .hbtn.measure-active { background: #ff9800; color: #0a0c10; border-color: #ff9800; }
 
-  /* Color toggle switch */
-  .toggle-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 9px;
-    color: #4a6a8a;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .toggle-label { white-space: nowrap; }
-  .toggle-switch {
-    position: relative;
-    width: 36px;
-    height: 18px;
-    background: #2a3a50;
-    border-radius: 9px;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-  .toggle-switch.active { background: #4a9eff; }
-  .toggle-switch::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 14px;
-    height: 14px;
-    background: #c5cdd9;
-    border-radius: 50%;
-    transition: transform 0.2s;
-  }
-  .toggle-switch.active::after { transform: translateX(18px); }
+
 
   /* File selector dropdown */
   #file-selector {
@@ -117,13 +85,16 @@
 
   #flight-label {
     font-size: 11px;
+    font-family: 'Courier New', monospace;
     color: #7a8fa8;
     flex: 1;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    letter-spacing: 0.5px;
   }
-  #flight-label span { color: #c0cfe0; margin-right: 12px; }
+  #info-flight { color: #4a9eff; font-size: 11px; margin-right: 8px; }
+  #info-points { color: #4adf8a; font-size: 10px; }
 
   #status-pill {
     font-size: 10px;
@@ -201,7 +172,7 @@
   #view-cube-wrap {
     position: fixed;
     top: 66px;
-    right: 16px;
+    right: 24px;
     width: 60px;
     height: 76px;
     z-index: 100;
@@ -697,6 +668,90 @@
   body.tab-ortho #live-tab-content,
   body.tab-ortho #live-stats-bar { display:none !important; }
 
+  /* ── Mosaic image viewer ── */
+  body.mosaic-active #canvas-wrap,
+  body.mosaic-active #overlay,
+  body.mosaic-active #view-cube-wrap,
+  body.mosaic-active #stats-bar,
+  body.mosaic-active #info-panel,
+  body.mosaic-active #measure-panel,
+  body.mosaic-active #controls-hint,
+  body.mosaic-active #point-info { display:none !important; }
+
+  #mosaic-canvas {
+    display: none;
+    position: fixed;
+    top: 48px; left: 0; right: 0; bottom: 28px;
+    background: #060810;
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+    z-index: 10;
+  }
+  body.mosaic-active #mosaic-canvas { display:block !important; }
+  #mosaic-canvas.dragging { cursor: grabbing; }
+  #mosaic-img {
+    position: absolute;
+    transform-origin: 0 0;
+    display: block;
+    max-width: none; max-height: none;
+    pointer-events: none;
+  }
+
+  #mosaic-info-panel {
+    display: none;
+    position: fixed;
+    bottom: 40px; left: 16px;
+    background: rgba(21,26,33,0.95);
+    border: 1px solid #2a3441;
+    border-radius: 8px;
+    padding: 12px 16px;
+    min-width: 240px;
+    font-size: 11px;
+    z-index: 50;
+    flex-direction: column;
+    gap: 2px;
+  }
+  body.mosaic-active #mosaic-info-panel { display:flex !important; }
+  #mosaic-info-panel h3 { color: #4fc3f7; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  #mosaic-info-panel .row { display:flex; justify-content:space-between; margin: 3px 0; }
+  #mosaic-info-panel .label { color: #78909c; }
+  #mosaic-info-panel .value { color: #c5cdd9; font-family: monospace; }
+  #mosaic-info-panel .section-title { color: #4a6a8a; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; margin-top: 10px; margin-bottom: 4px; border-top: 1px solid #2a3441; padding-top: 8px; }
+
+  #mosaic-stats-bar {
+    display: none;
+    position: fixed;
+    bottom: 0; left: 0; right: 0; height: 28px;
+    background: rgba(10,12,16,0.9);
+    border-top: 1px solid #1e2a3a;
+    align-items: center;
+    padding: 0 16px; gap: 24px;
+    font-size: 10px; color: #4a6a8a;
+    z-index: 110;
+  }
+  body.mosaic-active #mosaic-stats-bar { display:flex !important; }
+  #mosaic-stats-bar .stat { display:flex; gap:6px; }
+  #mosaic-stats-bar .stat-label { color: #2a4a6a; text-transform: uppercase; letter-spacing: 1px; }
+  #mosaic-stats-bar .stat-value { color: #7a9aba; }
+  #mosaic-close-btn {
+    margin-left: auto;
+    font-family: 'Courier New', monospace; font-size: 10px; padding: 4px 10px;
+    background: transparent; border: 1px solid #2a3a50; color: #4a6a8a;
+    cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: all 0.2s;
+  }
+  #mosaic-close-btn:hover { border-color: #df4a4a; color: #df4a4a; }
+
+  #mosaic-controls-hint {
+    display: none;
+    position: fixed;
+    bottom: 36px; right: 12px;
+    font-size: 9px; color: #2a4060;
+    line-height: 1.8; letter-spacing: 0.5px;
+    text-align: right; pointer-events: none; z-index: 50;
+  }
+  body.mosaic-active #mosaic-controls-hint { display:block !important; }
+
   /* ══════════════════════════════════════════════
      TAB SYSTEM
   ══════════════════════════════════════════════ */
@@ -745,9 +800,9 @@
   }
   #live-tab-content.active { display: flex; }
 
-  /* Camera feed pane (left 60%) */
+  /* Camera feed pane (left ~45%) */
   #camera-pane {
-    flex: 3;
+    flex: 9;
     position: relative;
     overflow: hidden;
     border-right: 1px solid #1e2a3a;
@@ -814,11 +869,11 @@
   /* Foxglove overlay (kept hidden, no longer shown) */
   #fg-overlay { display: none; }
 
-  /* Right telemetry panel */
+  /* Right telemetry panel — wider now that camera is smaller */
   #live-panel {
-    flex: 2;
-    min-width: 280px;
-    max-width: 480px;
+    flex: 11;
+    min-width: 300px;
+    max-width: 560px;
     display: flex; flex-direction: column;
     overflow: hidden; background: #0a0e14;
   }
@@ -843,15 +898,15 @@
   #conn-btn.connected { background: rgba(74,223,138,0.1); border-color:#4adf8a; color:#4adf8a; }
 
   /* Panel sections */
-  .lp-section { border-bottom: 1px solid #1a2330; padding: 10px 14px; }
-  .lp-title { font-size:9px; letter-spacing:2px; text-transform:uppercase; color:#2a4a6a; margin-bottom:8px; }
+  .lp-section { border-bottom: 1px solid #1a2330; padding: 7px 12px; }
+  .lp-title { font-size:9px; letter-spacing:2px; text-transform:uppercase; color:#2a4a6a; margin-bottom:5px; }
 
   /* Telemetry cards */
-  .telem-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
-  .telem-card { background:#0e1520; border:1px solid #1a2535; border-radius:4px; padding:7px 9px; }
-  .telem-label { font-size:8px; color:#3a5a7a; text-transform:uppercase; letter-spacing:1px; margin-bottom:3px; }
-  .telem-value { font-size:16px; font-weight:bold; color:#4a9eff; font-family:'Courier New',monospace; line-height:1; }
-  .telem-unit { font-size:8px; color:#3a5a7a; margin-left:2px; }
+  .telem-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+  .telem-card { background:#0e1520; border:1px solid #1a2535; border-radius:4px; padding:5px 7px; }
+  .telem-label { font-size:7px; color:#3a5a7a; text-transform:uppercase; letter-spacing:1px; margin-bottom:2px; }
+  .telem-value { font-size:13px; font-weight:bold; color:#4a9eff; font-family:'Courier New',monospace; line-height:1.1; }
+  .telem-unit { font-size:7px; color:#3a5a7a; margin-left:2px; }
   .telem-card.warn .telem-value { color:#ffb44a; }
   .telem-card.danger .telem-value { color:#df4a4a; }
   .telem-card.good .telem-value { color:#4adf8a; }
@@ -900,6 +955,82 @@
   body.tab-live #controls-hint,
   body.tab-live #sidebar,
   body.tab-live #point-info { display:none !important; }
+
+  /* ── Flight event log panel ─────────────────────────────────────────────── */
+  #flight-log-section {
+    border-top: 1px solid #1a2330;
+    padding: 7px 12px 8px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex-shrink: 0;
+  }
+  #flight-log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 5px;
+  }
+  #flight-log-title-text {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #2a4a6a;
+  }
+  #flight-log-status {
+    font-size: 7px;
+    letter-spacing: 1px;
+    color: #1e3a5a;
+    text-transform: uppercase;
+  }
+  #flight-log-status.live {
+    color: #4adf8a;
+    animation: log-pulse 2s ease-in-out infinite;
+  }
+  @keyframes log-pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+  #flight-log-list {
+    max-height: 160px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #1e2a3a transparent;
+  }
+  #flight-log-list::-webkit-scrollbar { width: 3px; }
+  #flight-log-list::-webkit-scrollbar-thumb { background: #1e2a3a; border-radius: 2px; }
+  .log-entry {
+    font-family: 'Courier New', monospace;
+    font-size: 8px;
+    color: #3a5a7a;
+    padding: 2px 0;
+    border-bottom: 1px solid #0d1520;
+    line-height: 1.4;
+    word-break: break-all;
+  }
+  .log-entry.new { animation: log-fade 3s ease forwards; }
+  @keyframes log-fade { 0%{color:#4adf8a} 40%{color:#4a9eff} 100%{color:#3a5a7a} }
+  .log-type      { color: #4a9eff; font-weight: bold; margin-right: 3px; }
+  .log-type.warn { color: #ffb44a; }
+  .log-type.crit { color: #df4a4a; }
+  .log-time      { color: #1e3a5a; margin-right: 3px; }
+
+  /* ── Download log button ──────────────────────────────────────────────────── */
+  #log-download-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid #2a3a50;
+    color: #4a6a8a;
+    cursor: pointer;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  #log-download-btn:hover { border-color: #4a9eff; color: #4a9eff; background: rgba(74,158,255,0.06); }
+  #log-download-btn svg { width:10px; height:10px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; }
 </style>
 </head>
 <body>
@@ -924,34 +1055,55 @@
   <div class="divider"></div>
   
   <button class="hbtn" id="btn-measure" title="Measure distance (M)">📏 Measure</button>
+
+  <button id="log-download-btn" onclick="downloadLastLog()" title="Download last flight event log as JSON">
+    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Flight Log
+  </button>
   
   <button id="btn-debug" title="Show all PLY files including intermediate outputs" onclick="toggleDebugMode()" style="
-    font-family:'Courier New',monospace;
-    font-size:9px;
-    letter-spacing:1px;
-    padding:3px 8px;
-    background:transparent;
-    border:1px solid #2a3a50;
-    color:#4a6a8a;
-    cursor:pointer;
-    text-transform:uppercase;
-    white-space:nowrap;
-    transition:all 0.2s;
-  ">🔬</button>
+    font-family:'Courier New',monospace;font-size:9px;letter-spacing:1px;padding:3px 8px;
+    background:transparent;border:1px solid #2a3a50;color:#4a6a8a;cursor:pointer;
+    text-transform:uppercase;white-space:nowrap;transition:all 0.2s;">🔬</button>
   
-  <div class="toggle-wrap">
-    <span class="toggle-label">Purple</span>
-    <div class="toggle-switch" id="color-toggle" title="Toggle color ramp style" onclick="toggleColorMode()"></div>
-    <span class="toggle-label">Viridis</span>
-  </div>
-  
-  <div class="divider"></div>
-  
-  <span id="flight-label"><span id="info-flight">-</span> <span id="info-points"></span></span>
-  
-  <button class="hbtn" id="flights-btn" title="Flight database">Flights ☰</button>
+  <button class="hbtn" id="flights-btn" title="Flight database" style="margin-left:auto;">Flights ☰</button>
   
   <div id="status-pill" class="ready">READY</div>
+</div>
+
+<!-- Mosaic image canvas -->
+<div id="mosaic-canvas">
+  <img id="mosaic-img" src="" alt="orthophoto">
+</div>
+
+<!-- Mosaic info panel -->
+<div id="mosaic-info-panel">
+  <h3>Image Info</h3>
+  <div class="row"><span class="label">File</span><span class="value" id="mi-file">—</span></div>
+  <div class="row"><span class="label">Resolution</span><span class="value" id="mi-resolution">—</span></div>
+  <div class="row"><span class="label">Size</span><span class="value" id="mi-size">—</span></div>
+  <div class="section-title">Coverage</div>
+  <div class="row"><span class="label">Lat range</span><span class="value" id="mi-lat">—</span></div>
+  <div class="row"><span class="label">Lon range</span><span class="value" id="mi-lon">—</span></div>
+  <div class="row"><span class="label">Extent</span><span class="value" id="mi-extent">—</span></div>
+  <div class="section-title">Metadata</div>
+  <div class="row"><span class="label">Frames</span><span class="value" id="mi-frames">—</span></div>
+  <div class="row"><span class="label">Mode</span><span class="value" id="mi-mode">—</span></div>
+  <div class="row"><span class="label">Session</span><span class="value" id="mi-session">—</span></div>
+</div>
+
+<!-- Mosaic stats bar -->
+<div id="mosaic-stats-bar">
+  <div class="stat"><span class="stat-label">Zoom</span><span class="stat-value" id="mi-zoom">100%</span></div>
+  <div class="stat"><span class="stat-label">Res</span><span class="stat-value" id="mi-res-stat">—</span></div>
+  <button id="mosaic-close-btn" onclick="closeMosaicViewer()">✕ Close</button>
+</div>
+
+<!-- Mosaic controls hint -->
+<div id="mosaic-controls-hint">
+  Scroll / Pinch — zoom<br>
+  Left drag — pan<br>
+  Dbl-click — fit to view
 </div>
 
 <!-- Canvas -->
@@ -1224,6 +1376,18 @@
       </div>
 
     </div><!-- /live-panel-scroll -->
+
+    <!-- Flight event log — fixed below scrollable telem, always visible -->
+    <div id="flight-log-section">
+      <div id="flight-log-header">
+        <span id="flight-log-title-text">◈ Flight Log</span>
+        <span id="flight-log-status">IDLE</span>
+      </div>
+      <div id="flight-log-list">
+        <div class="log-entry" style="color:#1e3a5a;">Waiting for events...</div>
+      </div>
+    </div>
+
   </div><!-- /live-panel -->
 </div><!-- /live-tab-content -->
 
@@ -1603,7 +1767,7 @@ function applyHeightRamp(positions, nVerts) {
 // Toggle color mode and reapply colors
 function toggleColorMode() {
   useViridisRamp = !useViridisRamp;
-  document.getElementById('color-toggle').classList.toggle('active', useViridisRamp);
+  const _ct = document.getElementById('color-toggle'); if(_ct) _ct.classList.toggle('active', useViridisRamp);
   
   // Reapply colors to current mesh if loaded
   if (currentMesh && currentMesh.geometry) {
@@ -1619,7 +1783,7 @@ window.toggleColorMode = toggleColorMode;
 
 // Initialize toggle state on load
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('color-toggle').classList.toggle('active', useViridisRamp);
+  const _ct = document.getElementById('color-toggle'); if(_ct) _ct.classList.toggle('active', useViridisRamp);
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1826,7 +1990,15 @@ document.getElementById('file-selector').addEventListener('change', async (e) =>
   const value = e.target.value;
   if (!value) return;
 
-  // ── Pi server file ────────────────────────────────────────────────────────
+  // ── Pi image file (mosaic.jpg) ────────────────────────────────────────────
+  if (value.startsWith('__img__')) {
+    const piPath = value.replace('__img__', '');
+    openMosaicViewerFromUrl(`${PI_BASE_URL}/${piPath}`, piPath.split('/').pop());
+    return;
+  }
+
+  // ── Pi PLY file ───────────────────────────────────────────────────────────
+  closeMosaicViewer();
   if (value.startsWith('__pi__')) {
     const piPath = value.replace('__pi__', '');
     await loadFromURL(`${PI_BASE_URL}/${piPath}`, piPath.split('/').pop());
@@ -1834,6 +2006,7 @@ document.getElementById('file-selector').addEventListener('change', async (e) =>
   }
 
   // ── Local file ────────────────────────────────────────────────────────────
+  closeMosaicViewer();
   const file = allPlyFiles.find(f => f.name === value);
   if (file) await loadLocalPLY(file);
 });
@@ -2453,22 +2626,36 @@ async function pollOrthoMosaic() {
     if (meta.session_id === lastOrthoSession) return;
     lastOrthoSession = meta.session_id;
 
-    // Update info bar
+    // Store for mosaic info panel
+    _orthoMeta = meta;
+
+    // Update ortho tab info bar
     document.getElementById('ortho-session-id').textContent = meta.session_id;
-    const modeStr    = meta.mode    ? meta.mode.toUpperCase() + ' path' : '';
-    const frameStr   = meta.frame_count ? `${meta.frame_count} frames` : '';
-    const colStr     = meta.collage_fallback ? '  ⚠ collage (stitcher failed)' : '';
+    const modeStr  = meta.mode        ? meta.mode.toUpperCase() + ' path' : '';
+    const frameStr = meta.frame_count ? `${meta.frame_count} frames` : '';
+    const colStr   = meta.collage_fallback ? '  ⚠ collage (stitcher failed)' : '';
     document.getElementById('ortho-meta-text').textContent =
       [modeStr, frameStr, colStr].filter(Boolean).join('  ·  ');
+    document.getElementById('ortho-no-data').style.display = 'none';
 
-    // Show/hide no-data placeholder
-    const noData = document.getElementById('ortho-no-data');
-    noData.style.display = 'none';
+    // Add 🌍 Orthophoto entry to file selector
+    const selector = document.getElementById('file-selector');
+    const existing = selector.querySelector('optgroup[data-mosaic]');
+    if (existing) existing.remove();
+    const mosaicPath = `rosbags/${meta.session_id}/ortho/mosaic.jpg`;
+    const group = document.createElement('optgroup');
+    group.label = '🌍 Orthophoto';
+    group.dataset.mosaic = '1';
+    const opt = document.createElement('option');
+    opt.value = `__img__${mosaicPath}`;
+    opt.textContent = `🌍 mosaic.jpg — ${meta.session_id}`;
+    group.appendChild(opt);
+    // Insert at top of selector after placeholder
+    selector.insertBefore(group, selector.children[1] || null);
+    selector.disabled = false;
 
-    // Build tile URL — PI_BASE_URL prefix required because tile paths are
-    // relative to serve.py root (rosbags/<session>/ortho/tiles/{z}/{x}/{y}.png)
+    // Build tile URL and init Leaflet map
     const tileUrl = `${PI_BASE_URL}/${meta.tile_url}`;
-
     _initOrthoMap(meta, tileUrl);
 
   } catch (_) {
@@ -2606,6 +2793,9 @@ function switchTab(tab) {
   currentTab = tab;
   document.body.className = `tab-${tab}`;
 
+  // Always dismiss mosaic viewer on tab switch
+  closeMosaicViewer();
+
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`tab-${tab}-btn`).classList.add('active');
 
@@ -2613,7 +2803,6 @@ function switchTab(tab) {
   const liveStatsBar = document.getElementById('live-stats-bar');
   const orthoContent = document.getElementById('ortho-tab-content');
 
-  // Hide all tab panels first
   liveContent.classList.remove('active');
   orthoContent.classList.remove('active');
   liveStatsBar.style.display = 'none';
@@ -2627,14 +2816,141 @@ function switchTab(tab) {
     }
   } else if (tab === 'ortho') {
     orthoContent.classList.add('active');
-    // Leaflet needs a size invalidation after the container becomes visible
     setTimeout(_orthoTabActivated, 50);
   } else {
-    // viewer tab — restore Three.js canvas
     setTimeout(onResize, 50);
   }
 }
 window.switchTab = switchTab;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MOSAIC IMAGE VIEWER (Pi server path)
+// Fetches mosaic.jpg from Pi server URL, displays with pan/zoom.
+// Info panel mirrors #info-panel. Stats bar mirrors #stats-bar.
+// ══════════════════════════════════════════════════════════════════════════════
+let _orthoMeta = null;   // populated by pollOrthoMosaic
+
+const _mv = { scale:1, ox:0, oy:0, dragging:false, lastX:0, lastY:0, imgW:0, imgH:0 };
+const MIN_SCALE = 0.05, MAX_SCALE = 20;
+
+function _mvApplyTransform() {
+  const img  = document.getElementById('mosaic-img');
+  const zoom = document.getElementById('mi-zoom');
+  if (img)  img.style.transform = `translate(${_mv.ox}px,${_mv.oy}px) scale(${_mv.scale})`;
+  if (zoom) zoom.textContent    = `${Math.round(_mv.scale * 100)}%`;
+}
+
+function _mvFitToView() {
+  const wrap = document.getElementById('mosaic-canvas');
+  if (!wrap || !_mv.imgW) return;
+  _mv.scale = Math.min(wrap.clientWidth / _mv.imgW, wrap.clientHeight / _mv.imgH) * 0.95;
+  _mv.ox    = (wrap.clientWidth  - _mv.imgW * _mv.scale) / 2;
+  _mv.oy    = (wrap.clientHeight - _mv.imgH * _mv.scale) / 2;
+  _mvApplyTransform();
+}
+
+async function openMosaicViewerFromUrl(url, filename) {
+  const img = document.getElementById('mosaic-img');
+  img.onload = () => {
+    _mv.imgW = img.naturalWidth;
+    _mv.imgH = img.naturalHeight;
+    _mvFitToView();
+    _populateMosaicInfo(filename, img.naturalWidth, img.naturalHeight);
+  };
+  img.src = url;
+  document.getElementById('info-flight').textContent = filename;
+  document.getElementById('info-points').textContent  = '';
+  document.body.classList.add('mosaic-active');
+  _initMosaicEvents();
+}
+
+function _populateMosaicInfo(filename, w, h) {
+  const _s = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  _s('mi-file',       filename);
+  _s('mi-resolution', `${w.toLocaleString()} × ${h.toLocaleString()} px`);
+  _s('mi-res-stat',   `${w.toLocaleString()}×${h.toLocaleString()}`);
+  _s('mi-size',       '—');   // size unknown from URL fetch without HEAD request
+
+  const meta = _orthoMeta;
+  if (meta && meta.bounds) {
+    const b   = meta.bounds;
+    const mLat = Math.abs(b.lat_max - b.lat_min) * 111320;
+    const mLon = Math.abs(b.lon_max - b.lon_min) * 111320 * Math.cos(((b.lat_min + b.lat_max) / 2) * Math.PI / 180);
+    _s('mi-lat',    `${b.lat_min.toFixed(5)}° → ${b.lat_max.toFixed(5)}°`);
+    _s('mi-lon',    `${b.lon_min.toFixed(5)}° → ${b.lon_max.toFixed(5)}°`);
+    _s('mi-extent', `${mLon.toFixed(0)} × ${mLat.toFixed(0)} m`);
+  } else {
+    _s('mi-lat','—'); _s('mi-lon','—'); _s('mi-extent','—');
+  }
+  if (meta) {
+    _s('mi-frames',  meta.frame_count > 0 ? `${meta.frame_count}` : '—');
+    _s('mi-mode',    meta.mode ? meta.mode.toUpperCase() : '—');
+    _s('mi-session', meta.session_id || '—');
+  }
+}
+
+let _mosaicEventsInit = false;
+function _initMosaicEvents() {
+  if (_mosaicEventsInit) return;
+  _mosaicEventsInit = true;
+  const wrap = document.getElementById('mosaic-canvas');
+
+  wrap.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    const cx = e.clientX - r.left, cy = e.clientY - r.top;
+    const f  = e.deltaY < 0 ? 1.12 : 1/1.12;
+    const ns = Math.min(MAX_SCALE, Math.max(MIN_SCALE, _mv.scale * f));
+    _mv.ox = cx - (cx - _mv.ox) * (ns / _mv.scale);
+    _mv.oy = cy - (cy - _mv.oy) * (ns / _mv.scale);
+    _mv.scale = ns; _mvApplyTransform();
+  }, { passive: false });
+
+  wrap.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    _mv.dragging = true; _mv.lastX = e.clientX; _mv.lastY = e.clientY;
+    wrap.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!_mv.dragging) return;
+    _mv.ox += e.clientX - _mv.lastX; _mv.oy += e.clientY - _mv.lastY;
+    _mv.lastX = e.clientX; _mv.lastY = e.clientY; _mvApplyTransform();
+  });
+  window.addEventListener('mouseup', () => { _mv.dragging = false; wrap.classList.remove('dragging'); });
+
+  let _ltd = null;
+  wrap.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) { _mv.dragging=true; _mv.lastX=e.touches[0].clientX; _mv.lastY=e.touches[0].clientY; }
+    else if (e.touches.length === 2) _ltd = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+  }, { passive:true });
+  wrap.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && _mv.dragging) {
+      _mv.ox += e.touches[0].clientX - _mv.lastX; _mv.oy += e.touches[0].clientY - _mv.lastY;
+      _mv.lastX = e.touches[0].clientX; _mv.lastY = e.touches[0].clientY; _mvApplyTransform();
+    } else if (e.touches.length === 2 && _ltd) {
+      const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+      const f = d/_ltd; _ltd = d;
+      const r = wrap.getBoundingClientRect();
+      const cx = (e.touches[0].clientX+e.touches[1].clientX)/2 - r.left;
+      const cy = (e.touches[0].clientY+e.touches[1].clientY)/2 - r.top;
+      const ns = Math.min(MAX_SCALE, Math.max(MIN_SCALE, _mv.scale*f));
+      _mv.ox = cx-(cx-_mv.ox)*(ns/_mv.scale); _mv.oy = cy-(cy-_mv.oy)*(ns/_mv.scale);
+      _mv.scale = ns; _mvApplyTransform();
+    }
+  }, { passive:false });
+  wrap.addEventListener('touchend', () => { _mv.dragging=false; _ltd=null; }, { passive:true });
+  wrap.addEventListener('dblclick', _mvFitToView);
+}
+
+function closeMosaicViewer() {
+  document.body.classList.remove('mosaic-active');
+  if (currentFilename) {
+    document.getElementById('info-flight').textContent = currentFilename;
+    document.getElementById('info-points').textContent  = '';
+  }
+}
+window.closeMosaicViewer = closeMosaicViewer;
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2750,6 +3066,13 @@ function connectTelemetryWs(wsUrl) {
 
     if (msg.op === 'rpi' && msg.data) {
       applyRpiData(msg.data);
+      return;
+    }
+
+    if (msg.op === 'flight_event' && msg.data) {
+      logLiveActive = true;
+      appendLiveLogEntry(msg.data);
+      stopLogPoll();
       return;
     }
 
@@ -3203,6 +3526,132 @@ function loadCamFeed(url) {
 document.body.classList.add('tab-viewer');
 initTelemetry();    // pre-fill WS URL and connect immediately
 initCameraFeed();   // pre-fill camera URL and start loading
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FLIGHT EVENT LOG PANEL
+// Live push: WS op="flight_event" from meshview_telemetry_server
+// Poll fallback: /api/logs?last=30 every 4s when WS not delivering events
+// ══════════════════════════════════════════════════════════════════════════════
+const MAX_LOG_ENTRIES = 60;
+let logLiveActive = false;
+let logPollTimer  = null;
+
+const _LOG_TYPE_CLS = {
+  RC_KILL:'crit', TEARDOWN:'crit', SLAM_STALE_LAND:'crit',
+  MOTION_ANOMALY:'crit', ALTITUDE_DEVIATION:'crit',
+  COLLISION_ZONE_CHANGE:'warn', OFFBOARD_PAUSE_START:'warn',
+  WAYPOINT_ABORTED:'warn', MODE_COMMAND:'warn',
+};
+
+function _logCls(type, ev) {
+  if (type === 'PREFLIGHT_CHECK' && ev && ev.passed === false) return 'crit';
+  if (type === 'COLLISION_ZONE_CHANGE' && ev && ev.zone_to === 'OBSTACLE') return 'crit';
+  return _LOG_TYPE_CLS[type] || '';
+}
+
+function _summarise(ev) {
+  const t = ev.event_type || '?';
+  switch (t) {
+    case 'WAYPOINT_DISPATCH':   return `wp ${ev.wp_index}/${ev.wp_total} → (${(ev.target_enu||[]).join(',')})`;
+    case 'WAYPOINT_REACHED':    return `wp ${ev.wp_index} ✓  err=${ev.pos_error_m}m`;
+    case 'WAYPOINT_ABORTED':    return `wp ${ev.wp_index} ✗`;
+    case 'GAP_FOUND':           return `fill#${ev.fill_index} → (${(ev.target_enu||[]).join(',')})  ${ev.dist_to_gap_m}m`;
+    case 'GAP_SCAN_RESULT':     return `${ev.gaps_found} gap(s) near (${(ev.search_enu||[]).join(',')})`;
+    case 'COLLISION_ZONE_CHANGE': return `${ev.zone_from}→${ev.zone_to}  ${ev.closest_m}m  ${ev.bearing_deg}°`;
+    case 'CAMERA_TRIGGER':      return `pos (${(ev.actual_enu||[]).join(',')})`;
+    case 'CAMERA_TRIGGER_FAILED': return `FAIL: ${ev.error||''}`;
+    case 'PREFLIGHT_CHECK':     return `[${ev.check}] ${ev.passed?'PASS':'FAIL'} — ${ev.reason}`;
+    case 'SLAM_STALE_LAND':     return `stale=${ev.stale_s}s → AUTO.LAND`;
+    case 'MOTION_ANOMALY':      return `${ev.type}  val=${ev.value||ev.deviation}`;
+    case 'TEARDOWN':            return ev.reason||'';
+    case 'MODE_COMMAND':        return `${ev.mode} (${ev.reason||''})`;
+    case 'TAKEOFF':             return `${ev.waypoint_count} waypoints`;
+    case 'LANDING':             return `${ev.reason||''}  pos (${(ev.actual_enu||[]).join(',')})`;
+    case 'ARMED':               return `${ev.waypoint_count} wps  lio_pid=${ev.pointlio_pid}`;
+    default: {
+      const skip = new Set(['event_type','t_s','ts_iso','script','pid','context','mode',
+                            'armed','pose_z','setpoint_z','angvel_mag','anomaly_flags','source']);
+      return Object.entries(ev).filter(([k])=>!skip.has(k)).slice(0,3)
+        .map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(' ');
+    }
+  }
+}
+
+function _buildLogDiv(ev, isNew) {
+  const ts   = ev.ts_iso ? ev.ts_iso.split('T')[1].split('.')[0] : '';
+  const type = ev.event_type || '?';
+  const cls  = _logCls(type, ev);
+  const div  = document.createElement('div');
+  div.className = 'log-entry' + (isNew ? ' new' : '');
+  div.innerHTML = `<span class="log-time">${ts}</span><span class="log-type ${cls}">${type}</span><span>${_summarise(ev)}</span>`;
+  return div;
+}
+
+function refreshLogPanel(events, isLive) {
+  const list = document.getElementById('flight-log-list');
+  const stat = document.getElementById('flight-log-status');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!events || !events.length) {
+    list.innerHTML = '<div class="log-entry" style="color:#1e3a5a;">No events recorded.</div>';
+    if (stat) { stat.textContent = 'EMPTY'; stat.className = ''; }
+    return;
+  }
+  events.slice(0, MAX_LOG_ENTRIES).forEach(ev => list.appendChild(_buildLogDiv(ev, false)));
+  if (stat) { stat.textContent = isLive ? '● LIVE' : `${events.length} events`; stat.className = isLive ? 'live' : ''; }
+}
+
+function appendLiveLogEntry(ev) {
+  const list = document.getElementById('flight-log-list');
+  const stat = document.getElementById('flight-log-status');
+  if (!list) return;
+  const ph = list.querySelector('.log-entry[style]');
+  if (ph && ph.textContent.includes('Waiting')) ph.remove();
+  list.insertBefore(_buildLogDiv(ev, true), list.firstChild);
+  while (list.children.length > MAX_LOG_ENTRIES) list.removeChild(list.lastChild);
+  if (stat) { stat.textContent = '● LIVE'; stat.className = 'live'; }
+}
+
+function startLogPoll() {
+  if (logPollTimer) return;
+  logPollTimer = setInterval(async () => {
+    if (logLiveActive) { stopLogPoll(); return; }
+    try {
+      const r = await fetch(`${PI_BASE_URL}/api/logs?last=30`, { cache:'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.events && d.events.length) refreshLogPanel(d.events, false);
+    } catch(_) {}
+  }, 4000);
+}
+
+function stopLogPoll() {
+  if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+}
+
+setTimeout(startLogPoll, 2000);
+
+// ── Download last flight event log ────────────────────────────────────────────
+async function downloadLastLog() {
+  const btn = document.getElementById('log-download-btn');
+  if (btn) { btn.style.color='#4adf8a'; btn.style.borderColor='#4adf8a'; }
+  try {
+    const r = await fetch(`${PI_BASE_URL}/api/log-download`, { cache:'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m  = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : 'flight_events.json';
+    const url = URL.createObjectURL(await r.blob());
+    Object.assign(document.createElement('a'), { href:url, download:filename }).click();
+    URL.revokeObjectURL(url);
+  } catch(err) {
+    console.error('[MeshView] log download failed:', err);
+    if (btn) { btn.style.color='#df4a4a'; btn.style.borderColor='#df4a4a'; }
+  } finally {
+    setTimeout(() => { if (btn) { btn.style.color=''; btn.style.borderColor=''; } }, 2000);
+  }
+}
+window.downloadLastLog = downloadLastLog;
 </script>
 
 </body>

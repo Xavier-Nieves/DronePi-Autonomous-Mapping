@@ -24,11 +24,63 @@ Dependencies
     rclpy, sensor_msgs (ROS 2 Jazzy), numpy
 """
 
+import json
 import math
+import os
 import threading
+import time
+from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
+
+
+# ── Shared flight event log writer ────────────────────────────────────────────
+
+class _FlightEventWriter:
+    """Appends structured events to the session flight_events.json.
+
+    Reads DRONEPI_SESSION_DIR from the environment — set by main.py before
+    any subprocess or import that may use this class. If absent the writer
+    is a no-op; gap detection still functions normally.
+
+    Identical design to the writer in collision_monitor.py:
+    atomic os.replace(), thread-safe lock, never raises.
+    """
+
+    def __init__(self) -> None:
+        session_dir = os.environ.get("DRONEPI_SESSION_DIR", "")
+        self._path  = (Path(session_dir) / "flight_events.json") if session_dir else None
+        self._lock  = threading.Lock()
+
+    def write(self, event_type: str, extra: dict) -> None:
+        """Append one event entry to flight_events.json. Never raises."""
+        if self._path is None:
+            return
+        try:
+            now   = time.time()
+            entry = {
+                "t_s":        round(now, 3),
+                "ts_iso":     datetime.fromtimestamp(now).isoformat(),
+                "event_type": event_type,
+                "source":     "gap_detector",
+            }
+            entry.update(extra)
+
+            tmp = Path(str(self._path) + ".tmp")
+            with self._lock:
+                existing: list = []
+                if self._path.exists():
+                    try:
+                        existing = json.loads(self._path.read_text())
+                    except Exception:
+                        existing = []
+                existing.append(entry)
+                tmp.write_text(json.dumps(existing, indent=2))
+                os.replace(tmp, self._path)
+        except Exception:
+            pass  # never let logging crash gap detection
 
 
 class GapDetector:
@@ -56,6 +108,12 @@ class GapDetector:
         self._lock = threading.Lock()
         self._sub  = None
 
+        # Structured flight event log writer (no-op if DRONEPI_SESSION_DIR unset)
+        self._event_writer = _FlightEventWriter()
+
+        # Cumulative gap-fill dispatch counter for log correlation
+        self._gap_fill_count: int = 0
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self, node) -> None:
@@ -77,6 +135,10 @@ class GapDetector:
                 PointCloud2, "/cloud_registered", self._cloud_cb, qos
             )
             print("  [GapDetector] Subscribed to /cloud_registered")
+            self._event_writer.write("GAP_DETECTOR_START", {
+                "cell_size_m": self._cell,
+                "min_density": self._min,
+            })
         except Exception as exc:
             print(f"  [GapDetector][WARN] Could not subscribe: {exc}")
 
@@ -148,6 +210,10 @@ class GapDetector:
         minimum density threshold. These coordinates are used directly as
         gap-fill waypoint targets.
 
+        Each call writes a GAP_SCAN_RESULT event to flight_events.json.
+        Each dispatched gap also writes a GAP_FOUND event so the log records
+        exactly which coordinates were returned and in what order.
+
         Args:
             ex:       East position in metres.
             ey:       North position in metres.
@@ -172,4 +238,31 @@ class GapDetector:
                             (cx + dx + 0.5) * self._cell,
                             (cy + dy + 0.5) * self._cell,
                         ))
+
+        # ── Structured event log ──────────────────────────────────────────────
+        with self._lock:
+            total_cells = len(self._grid)
+
+        self._event_writer.write("GAP_SCAN_RESULT", {
+            "search_enu":    [round(ex, 2), round(ey, 2)],
+            "radius_m":      round(radius_m, 2),
+            "gaps_found":    len(gaps),
+            "total_cells":   total_cells,
+            "cell_size_m":   self._cell,
+            "min_density":   self._min,
+        })
+
+        for idx, (gx, gy) in enumerate(gaps):
+            self._gap_fill_count += 1
+            self._event_writer.write("GAP_FOUND", {
+                "fill_index":    self._gap_fill_count,
+                "gap_index":     idx + 1,
+                "gaps_in_batch": len(gaps),
+                "target_enu":    [round(gx, 2), round(gy, 2)],
+                "near_enu":      [round(ex, 2), round(ey, 2)],
+                "dist_to_gap_m": round(
+                    math.hypot(gx - ex, gy - ey), 2
+                ),
+            })
+
         return gaps

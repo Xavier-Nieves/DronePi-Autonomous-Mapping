@@ -74,6 +74,7 @@ class MeshviewTelemetryBridge(Node):
         self.create_subscription(Imu, "/mavros/imu/data", self.on_imu, 10)
         self.create_subscription(NavSatFix, "/mavros/global_position/global", self.on_gps, 10)
         self.create_subscription(String, "/rpi/health", self.on_rpi_health, 10)
+        self.create_subscription(String, "/dronepi/flight_event", self.on_flight_event, 10)
 
         self.create_timer(1.0, self.broadcast_snapshot)
         self.get_logger().info(f"MeshView telemetry bridge ready on ws://{WS_HOST}:{WS_PORT}")
@@ -166,6 +167,20 @@ class MeshviewTelemetryBridge(Node):
         self.latest["rpi"]["throttled"]    = data.get("throttled")
         self.latest["rpi"]["uptime_s"]     = data.get("uptime_s")
         self.broadcast_now({"op": "rpi", "data": self.latest["rpi"]})
+
+    def on_flight_event(self, msg: String):
+        """Forward /dronepi/flight_event JSON strings to all WS clients.
+
+        SafeFlightMixin publishes one-line JSON to this topic for each
+        _log_event() call so meshview can show a live event feed without
+        polling /api/logs. The topic carries the raw event dict.
+        op = "flight_event"  →  meshview appends to its live log panel.
+        """
+        try:
+            event = json.loads(msg.data)
+        except Exception:
+            return
+        self.broadcast_now({"op": "flight_event", "data": event})
 
 
 async def ws_handler(websocket):

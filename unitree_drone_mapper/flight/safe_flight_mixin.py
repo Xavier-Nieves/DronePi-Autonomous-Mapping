@@ -907,6 +907,23 @@ class SafeFlightMixin:
         except Exception as exc:
             log.warning(f"[SafeFlightMixin] Event log write failed: {exc}")
 
+        # ── Mirror to repo logs/ for dev visibility ───────────────────────────
+        # Primary copy lives on SSD at _event_log_path.
+        # A second copy is written to ~/unitree_lidar_project/logs/events/
+        # so developers can inspect logs without mounting the SSD.
+        # Failure is non-fatal and never propagates.
+        try:
+            repo_logs = (
+                Path(__file__).resolve().parent.parent
+                / "logs" / "events"
+            )
+            repo_logs.mkdir(parents=True, exist_ok=True)
+            mirror_path = repo_logs / f"{self._session_tag}_events.json"
+            mirror_path.write_text(json.dumps(data, indent=2))
+            log.info(f"[SafeFlightMixin] Event log mirrored → {mirror_path}")
+        except Exception as exc:
+            log.debug(f"[SafeFlightMixin] Event log mirror failed (non-fatal): {exc}")
+
     # ══════════════════════════════════════════════════════════════════════════
     # FLIGHT LOGGER INTEGRATION
     # ══════════════════════════════════════════════════════════════════════════

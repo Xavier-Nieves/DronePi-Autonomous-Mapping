@@ -25,7 +25,7 @@
     border-bottom: 1px solid #1e2a3a;
     display: flex;
     align-items: center;
-    padding: 0 16px;
+    padding: 0 24px;
     gap: 12px;
     z-index: 100;
     backdrop-filter: blur(8px);
@@ -172,7 +172,7 @@
   #view-cube-wrap {
     position: fixed;
     top: 66px;
-    right: 16px;
+    right: 24px;
     width: 60px;
     height: 76px;
     z-index: 100;
@@ -657,7 +657,7 @@
 
   /* Right telemetry panel */
   #live-panel {
-    width: 300px; min-width: 260px;
+    width: 400px; min-width: 300px;
     display: flex; flex-direction: column;
     overflow: hidden; background: #0a0e14;
   }
@@ -682,15 +682,15 @@
   #conn-btn.connected { background: rgba(74,223,138,0.1); border-color:#4adf8a; color:#4adf8a; }
 
   /* Panel sections */
-  .lp-section { border-bottom: 1px solid #1a2330; padding: 10px 14px; }
-  .lp-title { font-size:9px; letter-spacing:2px; text-transform:uppercase; color:#2a4a6a; margin-bottom:8px; }
+  .lp-section { border-bottom: 1px solid #1a2330; padding: 7px 12px; }
+  .lp-title { font-size:9px; letter-spacing:2px; text-transform:uppercase; color:#2a4a6a; margin-bottom:5px; }
 
   /* Telemetry cards */
-  .telem-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
-  .telem-card { background:#0e1520; border:1px solid #1a2535; border-radius:4px; padding:7px 9px; }
-  .telem-label { font-size:8px; color:#3a5a7a; text-transform:uppercase; letter-spacing:1px; margin-bottom:3px; }
-  .telem-value { font-size:16px; font-weight:bold; color:#4a9eff; font-family:'Courier New',monospace; line-height:1; }
-  .telem-unit { font-size:8px; color:#3a5a7a; margin-left:2px; }
+  .telem-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+  .telem-card { background:#0e1520; border:1px solid #1a2535; border-radius:4px; padding:5px 7px; }
+  .telem-label { font-size:7px; color:#3a5a7a; text-transform:uppercase; letter-spacing:1px; margin-bottom:2px; }
+  .telem-value { font-size:13px; font-weight:bold; color:#4a9eff; font-family:'Courier New',monospace; line-height:1.1; }
+  .telem-unit { font-size:7px; color:#3a5a7a; margin-left:2px; }
   .telem-card.warn .telem-value { color:#ffb44a; }
   .telem-card.danger .telem-value { color:#df4a4a; }
   .telem-card.good .telem-value { color:#4adf8a; }
@@ -938,6 +938,39 @@
     text-align: right; pointer-events: none; z-index: 50;
   }
   body.mosaic-active #mosaic-controls-hint { display:block !important; }
+
+  /* ── Flight event log panel ─────────────────────────────────────────────── */
+  #flight-log-section {
+    border-top: 1px solid #1a2330;
+    padding: 7px 12px 8px;
+    display: flex; flex-direction: column;
+    min-height: 0; flex-shrink: 0;
+  }
+  #flight-log-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:5px; }
+  #flight-log-title-text { font-size:9px; letter-spacing:2px; text-transform:uppercase; color:#2a4a6a; }
+  #flight-log-status { font-size:7px; letter-spacing:1px; color:#1e3a5a; text-transform:uppercase; }
+  #flight-log-status.live { color:#4adf8a; animation:log-pulse 2s ease-in-out infinite; }
+  @keyframes log-pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+  #flight-log-list { max-height:160px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:#1e2a3a transparent; }
+  #flight-log-list::-webkit-scrollbar { width:3px; }
+  #flight-log-list::-webkit-scrollbar-thumb { background:#1e2a3a; border-radius:2px; }
+  .log-entry { font-family:'Courier New',monospace; font-size:8px; color:#3a5a7a; padding:2px 0; border-bottom:1px solid #0d1520; line-height:1.4; word-break:break-all; }
+  .log-entry.new { animation:log-fade 3s ease forwards; }
+  @keyframes log-fade { 0%{color:#4adf8a} 40%{color:#4a9eff} 100%{color:#3a5a7a} }
+  .log-type      { color:#4a9eff; font-weight:bold; margin-right:3px; }
+  .log-type.warn { color:#ffb44a; }
+  .log-type.crit { color:#df4a4a; }
+  .log-time      { color:#1e3a5a; margin-right:3px; }
+
+  /* ── Download log button ──────────────────────────────────────────────────── */
+  #log-download-btn {
+    display:inline-flex; align-items:center; gap:4px;
+    font-family:'Courier New',monospace; font-size:9px; letter-spacing:1px;
+    padding:4px 10px; background:transparent; border:1px solid #2a3a50;
+    color:#4a6a8a; cursor:pointer; text-transform:uppercase; white-space:nowrap; transition:all 0.2s;
+  }
+  #log-download-btn:hover { border-color:#4a9eff; color:#4a9eff; background:rgba(74,158,255,0.06); }
+  #log-download-btn svg { width:10px; height:10px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; }
 </style>
 </head>
 <body>
@@ -997,14 +1030,16 @@
   <div class="divider"></div>
   
   <button class="hbtn" id="btn-measure" title="Measure distance (M)">📏 Measure</button>
-  
-  <div class="divider"></div>
-  
-  <span id="flight-label"><span id="info-flight">—</span> <span id="info-points"></span></span>
-  
-  <button class="hbtn" id="flights-btn" title="Flight database">Flights ☰</button>
-  
-  <div id="status-pill" class="ready">READY</div>
+
+  <button id="log-download-btn" onclick="downloadLastLog()" title="Download last flight event log as JSON">
+    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Flight Log
+  </button>
+
+  <button class="hbtn" id="flights-btn" title="Flight database" style="margin-left:auto;">Flights ☰</button>
+
+  <div id="status-pill" class="ready" >READY</div>
+
 </div>
 
 <!-- Canvas -->
@@ -1270,6 +1305,18 @@
       </div>
 
     </div><!-- /live-panel-scroll -->
+
+    <!-- Flight event log — fixed below scrollable telem, always visible -->
+    <div id="flight-log-section">
+      <div id="flight-log-header">
+        <span id="flight-log-title-text">◈ Flight Log</span>
+        <span id="flight-log-status">IDLE</span>
+      </div>
+      <div id="flight-log-list">
+        <div class="log-entry" style="color:#1e3a5a;">Waiting for events...</div>
+      </div>
+    </div>
+
   </div><!-- /live-panel -->
 </div><!-- /live-tab-content -->
 
@@ -3214,6 +3261,112 @@ function drawGpsMap() {
 
 // Init: set viewer tab active on load
 document.body.classList.add('tab-viewer');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FLIGHT EVENT LOG PANEL — poll /api/logs every 4s from Pi
+// ══════════════════════════════════════════════════════════════════════════════
+const MAX_LOG_ENTRIES = 60;
+let logPollTimer = null;
+
+const _LOG_TYPE_CLS = {
+  RC_KILL:'crit', TEARDOWN:'crit', SLAM_STALE_LAND:'crit',
+  MOTION_ANOMALY:'crit', ALTITUDE_DEVIATION:'crit',
+  COLLISION_ZONE_CHANGE:'warn', OFFBOARD_PAUSE_START:'warn',
+  WAYPOINT_ABORTED:'warn', MODE_COMMAND:'warn',
+};
+
+function _logCls(type, ev) {
+  if (type === 'PREFLIGHT_CHECK' && ev && ev.passed === false) return 'crit';
+  if (type === 'COLLISION_ZONE_CHANGE' && ev && ev.zone_to === 'OBSTACLE') return 'crit';
+  return _LOG_TYPE_CLS[type] || '';
+}
+
+function _summarise(ev) {
+  const t = ev.event_type || '?';
+  switch (t) {
+    case 'WAYPOINT_DISPATCH':     return `wp ${ev.wp_index}/${ev.wp_total} → (${(ev.target_enu||[]).join(',')})`;
+    case 'WAYPOINT_REACHED':      return `wp ${ev.wp_index} ✓  err=${ev.pos_error_m}m`;
+    case 'WAYPOINT_ABORTED':      return `wp ${ev.wp_index} ✗`;
+    case 'GAP_FOUND':             return `fill#${ev.fill_index} → (${(ev.target_enu||[]).join(',')})  ${ev.dist_to_gap_m}m`;
+    case 'GAP_SCAN_RESULT':       return `${ev.gaps_found} gap(s) near (${(ev.search_enu||[]).join(',')})`;
+    case 'COLLISION_ZONE_CHANGE': return `${ev.zone_from}→${ev.zone_to}  ${ev.closest_m}m  ${ev.bearing_deg}°`;
+    case 'CAMERA_TRIGGER':        return `pos (${(ev.actual_enu||[]).join(',')})`;
+    case 'CAMERA_TRIGGER_FAILED': return `FAIL: ${ev.error||''}`;
+    case 'PREFLIGHT_CHECK':       return `[${ev.check}] ${ev.passed?'PASS':'FAIL'} — ${ev.reason}`;
+    case 'SLAM_STALE_LAND':       return `stale=${ev.stale_s}s → AUTO.LAND`;
+    case 'MOTION_ANOMALY':        return `${ev.type}  val=${ev.value||ev.deviation}`;
+    case 'TEARDOWN':              return ev.reason||'';
+    case 'MODE_COMMAND':          return `${ev.mode} (${ev.reason||''})`;
+    case 'TAKEOFF':               return `${ev.waypoint_count} waypoints`;
+    case 'LANDING':               return `${ev.reason||''}  pos (${(ev.actual_enu||[]).join(',')})`;
+    case 'ARMED':                 return `${ev.waypoint_count} wps  lio_pid=${ev.pointlio_pid}`;
+    default: {
+      const skip = new Set(['event_type','t_s','ts_iso','script','pid','context','mode',
+                            'armed','pose_z','setpoint_z','angvel_mag','anomaly_flags','source']);
+      return Object.entries(ev).filter(([k])=>!skip.has(k)).slice(0,3)
+        .map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(' ');
+    }
+  }
+}
+
+function _buildLogDiv(ev, isNew) {
+  const ts   = ev.ts_iso ? ev.ts_iso.split('T')[1].split('.')[0] : '';
+  const type = ev.event_type || '?';
+  const cls  = _logCls(type, ev);
+  const div  = document.createElement('div');
+  div.className = 'log-entry' + (isNew ? ' new' : '');
+  div.innerHTML = `<span class="log-time">${ts}</span><span class="log-type ${cls}">${type}</span><span>${_summarise(ev)}</span>`;
+  return div;
+}
+
+function refreshLogPanel(events) {
+  const list = document.getElementById('flight-log-list');
+  const stat = document.getElementById('flight-log-status');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!events || !events.length) {
+    list.innerHTML = '<div class="log-entry" style="color:#1e3a5a;">No events recorded.</div>';
+    if (stat) { stat.textContent = 'EMPTY'; stat.className = ''; }
+    return;
+  }
+  events.slice(0, MAX_LOG_ENTRIES).forEach(ev => list.appendChild(_buildLogDiv(ev, false)));
+  if (stat) { stat.textContent = `${events.length} events`; stat.className = ''; }
+}
+
+function startLogPoll() {
+  if (logPollTimer) return;
+  logPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`${PI_BASE_URL}/api/logs?last=30`, { cache:'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.events && d.events.length) refreshLogPanel(d.events);
+    } catch(_) {}
+  }, 4000);
+}
+
+setTimeout(startLogPoll, 2000);
+
+async function downloadLastLog() {
+  const btn = document.getElementById('log-download-btn');
+  if (btn) { btn.style.color='#4adf8a'; btn.style.borderColor='#4adf8a'; }
+  try {
+    const r = await fetch(`${PI_BASE_URL}/api/log-download`, { cache:'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m  = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : 'flight_events.json';
+    const url = URL.createObjectURL(await r.blob());
+    Object.assign(document.createElement('a'), { href:url, download:filename }).click();
+    URL.revokeObjectURL(url);
+  } catch(err) {
+    console.error('[LocalViewer] log download failed:', err);
+    if (btn) { btn.style.color='#df4a4a'; btn.style.borderColor='#df4a4a'; }
+  } finally {
+    setTimeout(() => { if (btn) { btn.style.color=''; btn.style.borderColor=''; } }, 2000);
+  }
+}
+window.downloadLastLog = downloadLastLog;
 </script>
 
 </body>

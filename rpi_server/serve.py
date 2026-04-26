@@ -40,6 +40,9 @@ from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 SERVE_DIR  = "/mnt/ssd/maps"
 ROSBAG_DIR = "/mnt/ssd/rosbags"
+LOG_DIR    = os.path.expanduser(
+    os.environ.get("DRONEPI_LOG_DIR", "~/unitree_lidar_project/logs")
+)
 PORT       = 8080
 BIND_ADDR  = "0.0.0.0"
 
@@ -273,6 +276,102 @@ def _empty_payload() -> dict:
     }
 
 
+def build_event_log(session_id: str = None, last_n: int = None) -> dict:
+    """Load flight_events.json for a session and return as JSON payload.
+
+    Lookup order:
+      1. session_id provided → ROSBAG_DIR/<session_id>/flight_events.json (SSD primary)
+      2. session_id provided but SSD absent → LOG_DIR/events/<session_id>_events.json
+      3. session_id None → most recent session from ROSBAG_DIR
+
+    Returns:
+        {
+          "session_id":  str,
+          "source":      "ssd" | "repo_mirror" | "not_found",
+          "event_count": int,
+          "events":      [ {...} ]   # newest-first
+        }
+    """
+    if session_id is None:
+        try:
+            entries = sorted(
+                [e for e in os.listdir(ROSBAG_DIR)
+                 if os.path.isdir(os.path.join(ROSBAG_DIR, e))
+                 and BAG_DIR_RE.match(e)],
+                reverse=True,
+            )
+            session_id = entries[0] if entries else None
+        except OSError:
+            session_id = None
+
+    if session_id is None:
+        return {"session_id": None, "source": "not_found", "event_count": 0, "events": []}
+
+    ssd_path  = os.path.join(ROSBAG_DIR, session_id, "flight_events.json")
+    repo_path = os.path.join(LOG_DIR, "events", f"{session_id}_events.json")
+
+    events = None
+    source = "not_found"
+    for path, label in [(ssd_path, "ssd"), (repo_path, "repo_mirror")]:
+        if os.path.isfile(path):
+            try:
+                with open(path) as f:
+                    events = json.load(f)
+                source = label
+                break
+            except (OSError, json.JSONDecodeError) as exc:
+                logging.warning(f"build_event_log: could not read {path}: {exc}")
+
+    if events is None:
+        return {"session_id": session_id, "source": "not_found", "event_count": 0, "events": []}
+
+    events = list(reversed(events))   # newest first
+    if last_n:
+        events = events[:last_n]
+
+    return {"session_id": session_id, "source": source,
+            "event_count": len(events), "events": events}
+
+
+def build_log_history(last_n: int = 50) -> dict:
+    """Return flight_history.log as structured JSON, newest-first.
+
+    Returns:
+        {
+          "total_flights": int,
+          "returned":      int,
+          "flights":       [ {"raw": str, "flight_num": int,
+                              "end_reason": str, "session_id": str} ]
+        }
+    """
+    history_file = os.path.join(LOG_DIR, "flight_history.log")
+    if not os.path.isfile(history_file):
+        return {"total_flights": 0, "returned": 0, "flights": []}
+    try:
+        with open(history_file) as f:
+            lines = [l.rstrip() for l in f if l.startswith("Flight ")]
+    except OSError as exc:
+        logging.warning(f"build_log_history: {exc}")
+        return {"total_flights": 0, "returned": 0, "flights": []}
+
+    total  = len(lines)
+    subset = list(reversed(lines[-last_n:] if last_n else lines))
+    parsed = []
+    for line in subset:
+        rec = {"raw": line}
+        m = re.match(r'^Flight\s+(\d+)', line)
+        if m:
+            rec["flight_num"] = int(m.group(1))
+        m = re.search(r'END:\s+(\S+)', line)
+        if m:
+            rec["end_reason"] = m.group(1).rstrip("|").strip()
+        m = re.search(r'Bag:\s+(\S+)', line)
+        if m:
+            rec["session_id"] = m.group(1)
+        parsed.append(rec)
+    return {"total_flights": total, "returned": len(parsed), "flights": parsed}
+
+
 # ── handler ───────────────────────────────────────────────────────────────────
 
 class CORSHandler(SimpleHTTPRequestHandler):
@@ -294,6 +393,18 @@ class CORSHandler(SimpleHTTPRequestHandler):
         # ── /api/flights ──────────────────────────────────────────────────────
         if self.path == "/api/flights":
             self._serve_flights()
+            return
+        # ── /api/logs?session=<id>&last=<n> — flight event log JSON ──────────
+        if self.path.startswith("/api/logs"):
+            self._serve_event_log()
+            return
+        # ── /api/log-history?last=<n> — flight_history.log as JSON ───────────
+        if self.path.startswith("/api/log-history"):
+            self._serve_log_history()
+            return
+        # ── /api/log-download?session=<id> — download flight_events.json ─────
+        if self.path.startswith("/api/log-download"):
+            self._serve_log_download()
             return
         # ── /stream — proxy MJPEG stream from camera_stream_server:8081 ───────
         if self.path == "/stream":
@@ -434,6 +545,123 @@ class CORSHandler(SimpleHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
 
+    def _serve_event_log(self):
+        """GET /api/logs?session=<id>&last=<n>"""
+        try:
+            session_id, last_n = None, None
+            if "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        if k == "session":
+                            session_id = v.strip()
+                        elif k == "last":
+                            try:
+                                last_n = int(v)
+                            except ValueError:
+                                pass
+            payload = build_event_log(session_id=session_id, last_n=last_n)
+            body    = json.dumps(payload, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type",   "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            logging.info(
+                f"/api/logs → session={payload['session_id']} "
+                f"events={payload['event_count']} source={payload['source']}"
+            )
+        except Exception as exc:
+            logging.error(f"/api/logs error: {exc}")
+            self.send_response(500)
+            self.end_headers()
+
+    def _serve_log_history(self):
+        """GET /api/log-history?last=<n>"""
+        try:
+            last_n = 50
+            if "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if part.startswith("last="):
+                        try:
+                            last_n = int(part.split("=", 1)[1])
+                        except ValueError:
+                            pass
+            payload = build_log_history(last_n=last_n)
+            body    = json.dumps(payload, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type",   "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            logging.info(
+                f"/api/log-history → {payload['returned']}/{payload['total_flights']} flights"
+            )
+        except Exception as exc:
+            logging.error(f"/api/log-history error: {exc}")
+            self.send_response(500)
+            self.end_headers()
+
+    def _serve_log_download(self):
+        """GET /api/log-download?session=<id>
+        Serves flight_events.json as a file download attachment.
+        If session omitted, uses the most recent session.
+        """
+        try:
+            session_id = None
+            if "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if part.startswith("session="):
+                        session_id = part.split("=", 1)[1].strip()
+
+            # Resolve session
+            if not session_id:
+                try:
+                    entries = sorted(
+                        [e for e in os.listdir(ROSBAG_DIR)
+                         if os.path.isdir(os.path.join(ROSBAG_DIR, e))
+                         and BAG_DIR_RE.match(e)],
+                        reverse=True,
+                    )
+                    session_id = entries[0] if entries else None
+                except OSError:
+                    session_id = None
+
+            if not session_id:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            ssd_path  = os.path.join(ROSBAG_DIR, session_id, "flight_events.json")
+            repo_path = os.path.join(LOG_DIR, "events", f"{session_id}_events.json")
+
+            file_path = None
+            for p in [ssd_path, repo_path]:
+                if os.path.isfile(p):
+                    file_path = p
+                    break
+
+            if not file_path:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            size     = os.path.getsize(file_path)
+            filename = f"{session_id}_flight_events.json"
+            self.send_response(200)
+            self.send_header("Content-Type",        "application/json")
+            self.send_header("Content-Length",      str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control",       "no-store")
+            self.end_headers()
+            with open(file_path, "rb") as f:
+                self.wfile.write(f.read())
+            logging.info(f"/api/log-download → {filename} ({size} bytes)")
+        except Exception as exc:
+            logging.error(f"/api/log-download error: {exc}")
+            self.send_response(500)
+            self.end_headers()
+
     def guess_type(self, path):
         _, ext = os.path.splitext(path)
         if ext.lower() in EXTRA_MIME:
@@ -473,6 +701,9 @@ def main():
     logging.info(f"  Port      : {PORT}")
     logging.info(f"  Viewer    : http://10.42.0.1:{PORT}/meshview.html")
     logging.info(f"  Flights   : http://10.42.0.1:{PORT}/api/flights")
+    logging.info(f"  Event log : http://10.42.0.1:{PORT}/api/logs")
+    logging.info(f"  Log hist  : http://10.42.0.1:{PORT}/api/log-history")
+    logging.info(f"  Download  : http://10.42.0.1:{PORT}/api/log-download")
     logging.info(f"  Press Ctrl+C to stop")
 
     try:

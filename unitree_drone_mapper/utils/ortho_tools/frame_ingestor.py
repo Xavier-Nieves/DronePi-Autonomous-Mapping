@@ -51,6 +51,10 @@ Each FrameRecord contains:
     ros_ts      float                 — ROS timestamp in seconds
     waypoint_idx int                  — waypoint index at trigger
     path        Path                  — source JPEG path (for debug)
+    enu_z       float or None         — SLAM Z in ENU frame (metres AGL, Z=0 at
+                                        takeoff). Read from sidecar enu.z written
+                                        by camera_capture.py. Used by MosaicBuilder
+                                        to compute GSD-accurate frame footprint.
 
 Dependencies
 ------------
@@ -95,6 +99,7 @@ class FrameRecord:
     ros_ts:       Optional[float]
     waypoint_idx: int
     path:         Path
+    enu_z:        Optional[float] = None  # SLAM AGL altitude (m) from sidecar enu.z
 
 
 # ── FrameIngestor ─────────────────────────────────────────────────────────────
@@ -262,6 +267,13 @@ class FrameIngestor:
             # Less accurate — logged at warning level in load() already
             pass
 
+        # Extract SLAM ENU Z (AGL altitude) for MosaicBuilder GSD calculation.
+        # camera_capture.py writes enu.z from the waypoint trigger context which
+        # carries the Point-LIO ENU position. Z=0 at takeoff so enu.z == AGL.
+        enu_block = sidecar.get("enu", {})
+        enu_z_raw = enu_block.get("z") if isinstance(enu_block, dict) else None
+        enu_z     = float(enu_z_raw) if (enu_z_raw is not None and float(enu_z_raw) > 0.5) else None
+
         return FrameRecord(
             image        = image,
             pose_4x4     = pose_4x4,
@@ -269,6 +281,7 @@ class FrameIngestor:
             ros_ts       = ros_ts,
             waypoint_idx = waypoint_idx,
             path         = jpeg_path,
+            enu_z        = enu_z,
         )
 
     def _load_pose_interpolator(self):

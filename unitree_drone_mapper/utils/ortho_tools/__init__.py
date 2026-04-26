@@ -24,33 +24,36 @@ Module dependency chain
 
     mosaic_builder.py  — FAST PATH
         Wraps cv2.Stitcher_create(). Produces a single stitched numpy canvas.
-        No georeferencing — pixel coordinates only. GPS affine applied after.
-        Output: np.ndarray (H, W, 3)
+        GPS affine applied after stitching via write_world_file().
+        Output: np.ndarray (H, W, 3), geo bounds dict
 
-    orthorectifier.py  — FULL PATH
+    orthorectifier.py  — FULL PATH (planned)
         Ray-casts each frame pixel through CameraModel into the LiDAR DTM.
         Requires dtm.ply from dtm_builder.py (mesh pipeline must run first).
         Output: np.ndarray with proper ground-sample distance, rasterio CRS.
 
     tile_cutter.py
-        Wraps gdal2tiles on either mosaic or orthorectified canvas.
-        Outputs tiles/{z}/{x}/{y}.png under the session ortho/ directory.
+        Wraps gdal2tiles on the stitched canvas or orthorectified raster.
+        Falls back to Pillow grid splitter when gdal2tiles is unavailable.
+        Outputs tiles/{z}/{x}/{y}.png under session ortho/ directory.
 
     publisher.py
         Writes ortho_metadata.json consumed by meshview.html slippy-map tab.
-        Fields: session_id, mode, bounds, tile_zoom_range, gps_waypoints.
+        Fields: session_id, mode, bounds, tile_url, zoom_min, zoom_max,
+                frame_count, gps_count, collage_fallback, processing_s.
 
 Pipeline paths
 --------------
     Fast (default):
-        FrameIngestor → QualityFilter → MosaicBuilder → TileCutter → Publisher
+        FrameIngestor → QualityFilter → MosaicBuilder → TileCutter → OrthoPublisher
 
     Full (--full flag, requires mesh pipeline to have completed first):
-        FrameIngestor → QualityFilter → Orthorectifier → TileCutter → Publisher
+        FrameIngestor → QualityFilter → Orthorectifier → TileCutter → OrthoPublisher
+        [Orthorectifier not yet implemented]
 
 Coordinate conventions
 ----------------------
-    Fast path output: pixel coordinates anchored by GPS affine transform.
+    Fast path output: pixel coordinates anchored by GPS affine (world file).
                       Not measurement-grade. Suitable for visual reference.
     Full path output: LiDAR DTM-derived ground coordinates. Same SLAM frame
                       as mesh_final.ply. Co-registration with 3D mesh is native.
@@ -58,17 +61,31 @@ Coordinate conventions
 Dependencies
 ------------
     opencv-python   — feature matching and stitching (fast path)
-    rasterio        — GeoTIFF CRS write (full path)
-    gdal2tiles      — tile pyramid generation (both paths)
-    texture_tools   — CameraModel, PoseInterpolator (full path, shared)
+    piexif          — GPS EXIF extraction from flight frames
+    gdal2tiles      — tile pyramid generation (both paths); Pillow fallback
+    Pillow          — tile fallback when gdal2tiles unavailable
+    rasterio        — GeoTIFF CRS write (full path, planned)
+    texture_tools   — CameraModel, PoseInterpolator (full path, planned)
 
-Install:
-    pip install opencv-python rasterio gdal2tiles --break-system-packages
+Install (RPi):
+    pip install opencv-python piexif Pillow --break-system-packages
+    sudo apt install gdal-bin
+
+Install (Windows/dev):
+    pip install opencv-python piexif Pillow gdal2tiles
 """
 
 from .frame_ingestor import FrameIngestor, FrameRecord
+from .quality_filter  import QualityFilter
+from .mosaic_builder  import MosaicBuilder
+from .tile_cutter     import TileCutter
+from .publisher       import OrthoPublisher
 
 __all__ = [
     "FrameIngestor",
     "FrameRecord",
+    "QualityFilter",
+    "MosaicBuilder",
+    "TileCutter",
+    "OrthoPublisher",
 ]

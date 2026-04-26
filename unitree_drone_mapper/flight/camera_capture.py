@@ -84,7 +84,7 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-FLIGHT_BASE_DIR  = Path("/mnt/ssd/maps")
+FLIGHT_BASE_DIR  = Path("/mnt/ssd/rosbags")
 
 SENSOR_MODE      = {"size": (2028, 1520)}   # Full-frame IMX477, max GSD
 FRAMERATE        = 10                        # fps — preview stream rate

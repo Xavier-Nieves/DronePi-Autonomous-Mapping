@@ -46,6 +46,9 @@ class DTMBuilder:
         Triangles with any edge longer than grid_res × max_edge_factor
         are removed. Prevents bridging across coverage gaps.
         Default 5.0 = remove triangles spanning more than 50cm at 0.10m grid.
+        This value is used as a lower bound; the builder auto-scales upward
+        for large-extent clouds (e.g. UTM-coordinate photogrammetry output)
+        to avoid over-filtering convex hull boundary triangles.
 
     Example
     -------
@@ -130,21 +133,51 @@ class DTMBuilder:
         faces = tri.simplices
 
         # ── Step 6: remove long-edge triangles (gap bridging) ─────────────────
-        max_edge   = self.grid_res * self.max_edge_factor
+        # Auto-scale max_edge to the actual cloud extent so large-survey or
+        # UTM-coordinate clouds (e.g. ODM output at X≈437000) are not
+        # over-filtered at convex hull boundaries.
+        #
+        # Heuristic: allow edges up to 3× the average inter-vertex spacing,
+        # but never less than grid_res × max_edge_factor.
+        #
+        # For a 1m grid over 394m × 310m (7,174 vertices):
+        #   extent_diag ≈ 499m, avg_spacing ≈ 499/√7174 ≈ 5.9m
+        #   auto_max_edge = max(5.0, 5.9×3) = 17.7m  → keeps terrain triangles
+        #
+        # For a 0.10m grid over 20m × 10m (≈2000 vertices, real LiDAR scan):
+        #   extent_diag ≈ 22m, avg_spacing ≈ 22/√2000 ≈ 0.49m
+        #   auto_max_edge = max(0.5, 0.49×3) = 1.47m  → same as before
+        extent_diag   = np.sqrt((x_max - x_min) ** 2 + (y_max - y_min) ** 2)
+        n_verts       = max(len(vertices), 1)
+        avg_spacing   = extent_diag / np.sqrt(n_verts)
+        auto_max_edge = max(self.grid_res * self.max_edge_factor,
+                            avg_spacing * 3.0)
+
         good_faces = []
         for f in faces:
             v0, v1, v2 = vertices[f[0]], vertices[f[1]], vertices[f[2]]
             e0 = np.linalg.norm(v0[:2] - v1[:2])
             e1 = np.linalg.norm(v1[:2] - v2[:2])
             e2 = np.linalg.norm(v2[:2] - v0[:2])
-            if max(e0, e1, e2) <= max_edge:
+            if max(e0, e1, e2) <= auto_max_edge:
                 good_faces.append(f)
 
-        faces   = np.array(good_faces, dtype=np.int32)
+        # Reshape guard: np.array([]) produces shape (0,) not (0, 3).
+        # trimesh.fix_normals() calls faces[:, [0, 1, 1, 2, 2, 0]] which
+        # raises IndexError on a 1D array when good_faces is empty.
+        if good_faces:
+            faces = np.array(good_faces, dtype=np.int32).reshape(-1, 3)
+        else:
+            faces = np.zeros((0, 3), dtype=np.int32)
+            print(f"  [DTMBuilder] WARNING: all {len(tri.simplices):,} triangles "
+                  f"removed by edge filter (auto_max_edge={auto_max_edge:.2f}m). "
+                  f"Returning empty mesh.")
+
         elapsed = time.time() - t0
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
         mesh.fix_normals()
 
-        print(f"  [DTMBuilder] DTM: {len(faces):,} triangles  ({elapsed:.1f}s)")
+        print(f"  [DTMBuilder] DTM: {len(faces):,} triangles  ({elapsed:.1f}s)  "
+              f"auto_max_edge={auto_max_edge:.2f}m")
         return mesh

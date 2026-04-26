@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DronePi · Unified Ground Station</title>
+<title>DronePi · Local Ground Station</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -65,38 +66,6 @@
   .hbtn.measure-active { background: #ff9800; color: #0a0c10; border-color: #ff9800; }
 
   /* Color toggle switch */
-  .toggle-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 9px;
-    color: #4a6a8a;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .toggle-label { white-space: nowrap; }
-  .toggle-switch {
-    position: relative;
-    width: 36px;
-    height: 18px;
-    background: #2a3a50;
-    border-radius: 9px;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-  .toggle-switch.active { background: #4a9eff; }
-  .toggle-switch::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 14px;
-    height: 14px;
-    background: #c5cdd9;
-    border-radius: 50%;
-    transition: transform 0.2s;
-  }
-  .toggle-switch.active::after { transform: translateX(18px); }
 
   /* File selector dropdown */
   #file-selector {
@@ -116,13 +85,16 @@
 
   #flight-label {
     font-size: 11px;
+    font-family: 'Courier New', monospace;
     color: #7a8fa8;
     flex: 1;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    letter-spacing: 0.5px;
   }
-  #flight-label span { color: #c0cfe0; margin-right: 12px; }
+  #info-flight { color: #4a9eff; font-size: 11px; margin-right: 8px; }
+  #info-points { color: #4adf8a; font-size: 10px; }
 
   #status-pill {
     font-size: 10px;
@@ -767,9 +739,243 @@
   body.tab-live #controls-hint,
   body.tab-live #sidebar,
   body.tab-live #point-info { display:none !important; }
+
+  /* ── Ortho local tab ── */
+  #ortho-tab-content {
+    display: none;
+    position: fixed;
+    top: 48px; left: 0; right: 0; bottom: 0;
+    flex-direction: column;
+    z-index: 90;
+  }
+  #ortho-tab-content.active { display: flex; }
+
+  #ortho-info-bar {
+    height: 34px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 1px solid #1e2a3a;
+    flex-shrink: 0;
+    font-size: 9px;
+    color: #4a6a8a;
+    letter-spacing: 1px;
+    background: rgba(10,12,16,0.97);
+    z-index: 1000;
+  }
+  #ortho-session-label {
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    color: #4a9eff;
+    letter-spacing: 1px;
+  }
+  #ortho-meta-text { color: #3a5a7a; flex: 1; }
+  #ortho-coords-display {
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    color: #4adf8a;
+    letter-spacing: 0.5px;
+    min-width: 260px;
+    text-align: right;
+  }
+  #ortho-load-btn {
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 3px 12px;
+    background: transparent;
+    border: 1px solid #2a3a50;
+    color: #4a6a8a;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  #ortho-load-btn:hover { border-color: #4a9eff; color: #4a9eff; }
+  #ortho-map {
+    flex: 1;
+    background: #0e131a;
+  }
+  #ortho-placeholder {
+    position: absolute;
+    inset: 34px 0 0 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: #0a0c10;
+    color: #2a4a6a;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    pointer-events: none;
+  }
+  #ortho-placeholder small { font-size: 9px; letter-spacing: 1px; color: #1e3050; }
+  #ortho-placeholder .ortho-hint {
+    font-size: 9px;
+    color: #2a4a7a;
+    letter-spacing: 1px;
+    border: 1px solid #1e3050;
+    padding: 6px 14px;
+    border-radius: 3px;
+    pointer-events: all;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  #ortho-placeholder .ortho-hint:hover { border-color: #4a9eff; color: #4a9eff; }
+  .leaflet-control-attribution {
+    background: rgba(10,12,16,0.8) !important;
+    color: #3a5a7a !important;
+    font-size: 8px !important;
+  }
+  .leaflet-control-attribution a { color: #4a7aaa !important; }
+
+  body.tab-ortho #canvas-wrap,
+  body.tab-ortho #overlay,
+  body.tab-ortho #view-cube-wrap,
+  body.tab-ortho #stats-bar,
+  body.tab-ortho #info-panel,
+  body.tab-ortho #measure-panel,
+  body.tab-ortho #controls-hint,
+  body.tab-ortho #sidebar,
+  body.tab-ortho #point-info,
+  body.tab-ortho #live-tab-content,
+  body.tab-ortho #live-stats-bar { display:none !important; }
+
+  /* ── Mosaic viewer — integrated into PLY viewer chrome ── */
+  body.mosaic-active #canvas-wrap,
+  body.mosaic-active #overlay,
+  body.mosaic-active #view-cube-wrap,
+  body.mosaic-active #stats-bar,
+  body.mosaic-active #info-panel,
+  body.mosaic-active #measure-panel,
+  body.mosaic-active #controls-hint,
+  body.mosaic-active #point-info { display:none !important; }
+
+  #mosaic-canvas {
+    display: none;
+    position: fixed;
+    top: 48px; left: 0; right: 0; bottom: 28px;
+    background: #060810;
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+    z-index: 10;
+  }
+  #mosaic-canvas.dragging { cursor: grabbing; }
+  #mosaic-img {
+    position: absolute;
+    transform-origin: 0 0;
+    display: block;
+    max-width: none; max-height: none;
+    pointer-events: none;
+  }
+  body.mosaic-active #mosaic-canvas { display:block !important; }
+
+  /* Info panel — same position/style as #info-panel */
+  #mosaic-info-panel {
+    display: none;
+    position: fixed;
+    bottom: 40px;
+    left: 16px;
+    background: rgba(21,26,33,0.95);
+    border: 1px solid #2a3441;
+    border-radius: 8px;
+    padding: 12px 16px;
+    min-width: 240px;
+    font-size: 11px;
+    z-index: 50;
+    flex-direction: column;
+    gap: 2px;
+  }
+  body.mosaic-active #mosaic-info-panel { display:flex !important; }
+  #mosaic-info-panel h3 {
+    color: #4fc3f7; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 2px; margin-bottom: 8px;
+    border-bottom: 1px solid #2a3441; padding-bottom: 6px;
+  }
+  #mosaic-info-panel .row { display:flex; justify-content:space-between; gap:12px; padding: 1px 0; }
+  #mosaic-info-panel .label { color: #78909c; }
+  #mosaic-info-panel .value { color: #c5cdd9; font-family: monospace; text-align:right; }
+  #mosaic-info-panel .section-title {
+    font-size: 9px; color: #2a4a6a; letter-spacing: 1.5px;
+    text-transform: uppercase; margin: 8px 0 4px;
+  }
+
+  /* Stats bar — same position/style as #stats-bar */
+  #mosaic-stats-bar {
+    display: none;
+    position: fixed;
+    bottom: 0; left: 0; right: 0; height: 28px;
+    background: rgba(10,12,16,0.9);
+    border-top: 1px solid #1e2a3a;
+    align-items: center;
+    padding: 0 16px; gap: 24px;
+    font-size: 10px; color: #4a6a8a;
+    z-index: 110;
+  }
+  body.mosaic-active #mosaic-stats-bar { display:flex !important; }
+  #mosaic-stats-bar .stat { display:flex; gap:6px; }
+  #mosaic-stats-bar .stat-label { color: #2a4a6a; text-transform: uppercase; letter-spacing: 1px; }
+  #mosaic-stats-bar .stat-value { color: #7a9aba; }
+  #mosaic-close-btn {
+    margin-left: auto;
+    font-family: 'Courier New', monospace; font-size: 9px; padding: 3px 10px;
+    background: transparent; border: 1px solid #2a3a50; color: #4a6a8a;
+    cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: all 0.2s;
+  }
+  #mosaic-close-btn:hover { border-color: #df4a4a; color: #df4a4a; }
+
+  /* Controls hint — same position/style as #controls-hint */
+  #mosaic-controls-hint {
+    display: none;
+    position: fixed;
+    bottom: 36px; right: 12px;
+    font-size: 9px; color: #2a4060;
+    line-height: 1.8; letter-spacing: 0.5px;
+    text-align: right; pointer-events: none; z-index: 50;
+  }
+  body.mosaic-active #mosaic-controls-hint { display:block !important; }
 </style>
 </head>
 <body>
+
+<!-- Mosaic image canvas — replaces #canvas-wrap when active -->
+<div id="mosaic-canvas">
+  <img id="mosaic-img" src="" alt="orthophoto">
+</div>
+
+<!-- Mosaic info panel — mirrors #info-panel -->
+<div id="mosaic-info-panel">
+  <h3>Image Info</h3>
+  <div class="row"><span class="label">File</span><span class="value" id="mi-file">—</span></div>
+  <div class="row"><span class="label">Resolution</span><span class="value" id="mi-resolution">—</span></div>
+  <div class="row"><span class="label">Size</span><span class="value" id="mi-size">—</span></div>
+  <div class="section-title">Coverage</div>
+  <div class="row"><span class="label">Lat range</span><span class="value" id="mi-lat">—</span></div>
+  <div class="row"><span class="label">Lon range</span><span class="value" id="mi-lon">—</span></div>
+  <div class="row"><span class="label">Extent</span><span class="value" id="mi-extent">—</span></div>
+  <div class="section-title">Metadata</div>
+  <div class="row"><span class="label">Frames</span><span class="value" id="mi-frames">—</span></div>
+  <div class="row"><span class="label">Mode</span><span class="value" id="mi-mode">—</span></div>
+  <div class="row"><span class="label">Processed</span><span class="value" id="mi-processed">—</span></div>
+</div>
+
+<!-- Mosaic stats bar — mirrors #stats-bar -->
+<div id="mosaic-stats-bar">
+  <div class="stat"><span class="stat-label">Zoom</span><span class="stat-value" id="mi-zoom">100%</span></div>
+  <div class="stat"><span class="stat-label">Res</span><span class="stat-value" id="mi-res-stat">—</span></div>
+  <button id="mosaic-close-btn" onclick="closeMosaicViewer()">✕ Close</button>
+</div>
+
+<!-- Mosaic controls hint — mirrors #controls-hint -->
+<div id="mosaic-controls-hint">
+  Scroll / Pinch — zoom<br>
+  Left drag — pan<br>
+  Dbl-click — fit to view
+</div>
 
 <!-- Header -->
 <div id="header">
@@ -777,6 +983,7 @@
   <div id="tab-bar">
     <button class="tab-btn active" id="tab-viewer-btn" onclick="switchTab('viewer')">◈ 3D Viewer</button>
     <button class="tab-btn" id="tab-live-btn" onclick="switchTab('live')"><span class="tab-dot"></span>Live Feed</button>
+    <button class="tab-btn" id="tab-ortho-btn" onclick="switchTab('ortho')">🗺 Ortho Map</button>
   </div>
   <div class="divider"></div>
   
@@ -790,12 +997,6 @@
   <div class="divider"></div>
   
   <button class="hbtn" id="btn-measure" title="Measure distance (M)">📏 Measure</button>
-  
-  <div class="toggle-wrap">
-    <span class="toggle-label">Purple</span>
-    <div class="toggle-switch" id="color-toggle" title="Toggle color ramp style" onclick="toggleColorMode()"></div>
-    <span class="toggle-label">Viridis</span>
-  </div>
   
   <div class="divider"></div>
   
@@ -896,6 +1097,29 @@
   <div id="flight-list">
     <div id="db-note">Connect to Pi server or open a local folder to see flights.</div>
   </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     ORTHO TAB — Local Leaflet map, loads tiles from folder via File API
+═══════════════════════════════════════════════════════════════ -->
+<div id="ortho-tab-content">
+  <div id="ortho-info-bar">
+    <span id="ortho-session-label">No session loaded</span>
+    <span id="ortho-meta-text">Open a session folder to load ortho tiles</span>
+    <span id="ortho-coords-display"></span>
+    <input type="file" id="ortho-meta-input" accept=".json" style="display:none">
+    <button id="ortho-load-btn" onclick="document.getElementById('ortho-meta-input').click()">
+      📂 Load ortho_metadata.json
+    </button>
+  </div>
+  <div id="ortho-placeholder">
+    <span>No ortho mosaic loaded</span>
+    <small>Open a scan session folder containing ortho_metadata.json and tiles/</small>
+    <span class="ortho-hint" onclick="document.getElementById('ortho-meta-input').click()">
+      📂 Select ortho_metadata.json
+    </span>
+  </div>
+  <div id="ortho-map"></div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
@@ -1063,6 +1287,7 @@
   <div class="stat"><span class="stat-label">Uptime</span><span class="stat-value" id="live-uptime">—</span></div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
 
@@ -1408,9 +1633,9 @@ function applyHeightRamp(positions, nVerts) {
 // Toggle color mode and reapply colors
 function toggleColorMode() {
   useViridisRamp = !useViridisRamp;
-  document.getElementById('color-toggle').classList.toggle('active', useViridisRamp);
-  
-  // Reapply colors to current mesh if loaded
+  const el = document.getElementById('color-toggle');
+  if (el) el.classList.toggle('active', useViridisRamp);
+
   if (currentMesh && currentMesh.geometry) {
     const geo = currentMesh.geometry;
     const positions = geo.attributes.position.array;
@@ -1424,7 +1649,8 @@ window.toggleColorMode = toggleColorMode;
 
 // Initialize toggle state on load
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('color-toggle').classList.toggle('active', useViridisRamp);
+  const el = document.getElementById('color-toggle');
+  if (el) el.classList.toggle('active', useViridisRamp);
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1434,6 +1660,7 @@ let currentMesh = null;
 let currentBuffer = null;
 let currentFilename = null;
 let allPlyFiles = [];
+let imageFiles  = [];   // JPEG/PNG files from session folder
 let categorizedFiles = { textured: [], mesh: [], cloud: [], other: [], debug: [] };
 let metadata = null;
 let boundingBox = null;
@@ -1494,30 +1721,40 @@ document.getElementById('btn-open-folder').addEventListener('click', () => {
 document.getElementById('folder-input').addEventListener('change', async (e) => {
   const files = Array.from(e.target.files);
   allPlyFiles = [];
+  imageFiles  = [];
   categorizedFiles = { textured: [], mesh: [], cloud: [], other: [], debug: [] };
   metadata = null;
 
   setStatus('loading', 'LOADING');
 
+  let orthoMetaFile  = null;
+  const orthoTileFiles = {};  // "z/x/y" → File
+
   for (const file of files) {
     const name = file.name.toLowerCase();
-    
+    const path = file.webkitRelativePath || file.name;
+
     if (name === 'metadata.json') {
-      try {
-        metadata = JSON.parse(await file.text());
-      } catch (err) {
-        console.warn('Failed to parse metadata.json:', err);
-      }
+      try { metadata = JSON.parse(await file.text()); } catch (_) {}
+    } else if (name === 'ortho_metadata.json') {
+      orthoMetaFile = file;
+    } else if (path.includes('tiles') && name.endsWith('.png')) {
+      const m = path.match(/tiles[\/\\](\d+)[\/\\](\d+)[\/\\](\d+)\.png$/i);
+      if (m) orthoTileFiles[`${m[1]}/${m[2]}/${m[3]}`] = file;
     } else if (name.endsWith('.ply')) {
       const category = categorizeFile(file.name);
       if (category) {
         allPlyFiles.push(file);
         categorizedFiles[category].push(file);
       }
+    } else if ((name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png'))
+               && !path.includes('tiles')) {
+      // Collect image files for the dropdown (excluding tile PNGs)
+      if (!imageFiles) imageFiles = [];
+      imageFiles.push(file);
     }
   }
 
-  console.log('Found PLY files:', allPlyFiles.map(f => f.name));
   populateFileSelector();
   updateMetadataDisplay();
 
@@ -1531,25 +1768,62 @@ document.getElementById('folder-input').addEventListener('change', async (e) => 
   if (!fileToLoad && categorizedFiles.other.length > 0) fileToLoad = categorizedFiles.other[0];
   if (!fileToLoad && allPlyFiles.length > 0) fileToLoad = allPlyFiles[0];
 
-  if (fileToLoad) {
-    await loadLocalPLY(fileToLoad);
-  }
-
+  if (fileToLoad) await loadLocalPLY(fileToLoad);
   document.getElementById('overlay').classList.add('hidden');
   setStatus('ready', 'READY');
+
+  // Load ortho if found in folder
+  if (orthoMetaFile && Object.keys(orthoTileFiles).length > 0) {
+    try {
+      const meta = JSON.parse(await orthoMetaFile.text());
+      await initLocalOrthoMap(meta, orthoTileFiles);
+      const btn = document.getElementById('tab-ortho-btn');
+      btn.style.borderColor = '#4adf8a';
+      btn.style.color = '#4adf8a';
+      setTimeout(() => { btn.style.borderColor = ''; btn.style.color = ''; }, 2500);
+    } catch (err) {
+      console.warn('[Ortho] Failed to load ortho from folder:', err);
+    }
+  }
+
+  // Register ortho drape assets (mosaic.jpg + bounds from ortho_metadata.json)
+  if (orthoMetaFile) {
+    try {
+      const meta     = JSON.parse(await orthoMetaFile.text());
+      const mosaicF  = files.find(f => f.name.toLowerCase() === 'mosaic.jpg' &&
+                                       (f.webkitRelativePath || '').includes('ortho'));
+      if (mosaicF) {
+        _registerOrthoDrapeAssets(meta, mosaicF);
+      }
+    } catch (_) {}
+  }
 });
 
 function populateFileSelector() {
   const selector = document.getElementById('file-selector');
-  selector.innerHTML = `<option value="">-- Select PLY (${allPlyFiles.length} files) --</option>`;
-  selector.disabled = allPlyFiles.length === 0;
+  selector.innerHTML = `<option value="">-- Select file --</option>`;
+  selector.disabled  = allPlyFiles.length === 0 && imageFiles.length === 0;
+
+  // Images optgroup — all JPEGs/PNGs found in session folder
+  if (imageFiles.length > 0) {
+    const group = document.createElement('optgroup');
+    group.label = '🌍 Orthophoto';
+    imageFiles.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = `__img__${f.name}`;
+      opt.textContent = `🌍 ${f.name}`;
+      group.appendChild(opt);
+    });
+    selector.appendChild(group);
+    selector.disabled = false;
+  }
 
   const groups = [
     { label: '🎨 Textured Mesh', files: categorizedFiles.textured },
     { label: '🔷 Final Mesh',    files: categorizedFiles.mesh },
     { label: '☁️ Point Cloud',   files: categorizedFiles.cloud },
     { label: '📄 Other',         files: categorizedFiles.other },
-    { label: '🔧 Debug',         files: categorizedFiles.debug }
+    { label: '🔧 Debug',         files: categorizedFiles.debug },
   ];
 
   for (const group of groups) {
@@ -1557,8 +1831,8 @@ function populateFileSelector() {
       const optgroup = document.createElement('optgroup');
       optgroup.label = group.label;
       for (const file of group.files) {
-        const option = document.createElement('option');
-        option.value = file.name;
+        const option       = document.createElement('option');
+        option.value       = file.name;
         option.textContent = file.name;
         optgroup.appendChild(option);
       }
@@ -1568,15 +1842,213 @@ function populateFileSelector() {
 }
 
 document.getElementById('file-selector').addEventListener('change', async (e) => {
-  const filename = e.target.value;
-  if (!filename) return;
-  const file = allPlyFiles.find(f => f.name === filename);
+  const value = e.target.value;
+  if (!value) return;
+
+  // Image file — open full-screen mosaic viewer
+  if (value.startsWith('__img__')) {
+    const fname = value.replace('__img__', '');
+    const file  = imageFiles.find(f => f.name === fname);
+    if (file) openMosaicViewer(file);
+    return;
+  }
+
+  // Any PLY selected — dismiss mosaic viewer first
+  closeMosaicViewer();
+
+  const file = allPlyFiles.find(f => f.name === value);
   if (file) await loadLocalPLY(file);
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PLY LOADING (using THREE.PLYLoader for reliability)
+// MOSAIC IMAGE VIEWER
+// Full-screen JPEG viewer triggered from the dropdown for any image file.
 // ══════════════════════════════════════════════════════════════════════════════
+let _mosaicFile = null;   // mosaic.jpg registered from ortho_metadata.json loading
+
+// ── Pan/zoom state ────────────────────────────────────────────────────────────
+const _mv = {
+  scale:   1,
+  ox:      0,      // image origin x on canvas (pixels)
+  oy:      0,      // image origin y on canvas (pixels)
+  dragging: false,
+  lastX:   0,
+  lastY:   0,
+  imgW:    0,
+  imgH:    0,
+};
+
+const MIN_SCALE = 0.05;
+const MAX_SCALE = 20;
+
+function _mvApplyTransform() {
+  const img  = document.getElementById('mosaic-img');
+  const zoom = document.getElementById('mi-zoom');
+  if (img)  img.style.transform = `translate(${_mv.ox}px, ${_mv.oy}px) scale(${_mv.scale})`;
+  if (zoom) zoom.textContent    = `${Math.round(_mv.scale * 100)}%`;
+}
+
+function _mvFitToView() {
+  const wrap = document.getElementById('mosaic-canvas');
+  if (!wrap || !_mv.imgW) return;
+  const ww = wrap.clientWidth;
+  const wh = wrap.clientHeight;
+  _mv.scale = Math.min(ww / _mv.imgW, wh / _mv.imgH) * 0.95;
+  _mv.ox    = (ww - _mv.imgW * _mv.scale) / 2;
+  _mv.oy    = (wh - _mv.imgH * _mv.scale) / 2;
+  _mvApplyTransform();
+}
+
+// orthoMeta is set by _registerOrthoDrapeAssets when folder is loaded
+let _orthoMeta = null;
+
+function openMosaicViewer(file) {
+  const f = file || _mosaicFile;
+  if (!f) return;
+
+  const img = document.getElementById('mosaic-img');
+
+  img.onload = () => {
+    _mv.imgW = img.naturalWidth;
+    _mv.imgH = img.naturalHeight;
+    _mvFitToView();
+    URL.revokeObjectURL(img.src);
+    // Populate info panel once image dimensions are known
+    _populateMosaicInfo(f, img.naturalWidth, img.naturalHeight);
+  };
+  img.src = URL.createObjectURL(f);
+
+  // Update header
+  document.getElementById('info-flight').textContent = f.name;
+  document.getElementById('info-points').textContent  = '';
+
+  document.body.classList.add('mosaic-active');
+  _initMosaicEvents();
+}
+
+function _populateMosaicInfo(f, w, h) {
+  const sizeMB = (f.size / (1024 * 1024)).toFixed(1);
+
+  _set('mi-file',       f.name);
+  _set('mi-resolution', `${w.toLocaleString()} × ${h.toLocaleString()} px`);
+  _set('mi-size',       `${sizeMB} MB`);
+  _set('mi-res-stat',   `${w.toLocaleString()}×${h.toLocaleString()}`);
+
+  const meta = _orthoMeta;
+  if (meta && meta.bounds) {
+    const b   = meta.bounds;
+    const dLat = Math.abs(b.lat_max - b.lat_min);
+    const dLon = Math.abs(b.lon_max - b.lon_min);
+    // Approximate extent in metres using equirectangular
+    const mLat = dLat * 111320;
+    const mLon = dLon * 111320 * Math.cos(((b.lat_min + b.lat_max) / 2) * Math.PI / 180);
+    _set('mi-lat', `${b.lat_min.toFixed(5)}° → ${b.lat_max.toFixed(5)}°`);
+    _set('mi-lon', `${b.lon_min.toFixed(5)}° → ${b.lon_max.toFixed(5)}°`);
+    _set('mi-extent', `${mLon.toFixed(0)} × ${mLat.toFixed(0)} m`);
+  } else {
+    _set('mi-lat', '—'); _set('mi-lon', '—'); _set('mi-extent', '—');
+  }
+
+  if (meta) {
+    _set('mi-frames',    meta.frame_count > 0 ? `${meta.frame_count}` : '—');
+    _set('mi-mode',      meta.mode ? meta.mode.toUpperCase() : '—');
+    _set('mi-processed', meta.timestamp ? meta.timestamp.replace('T', ' ').replace('Z', ' UTC') : '—');
+  } else {
+    _set('mi-frames', '—'); _set('mi-mode', '—'); _set('mi-processed', '—');
+  }
+}
+
+function _set(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function closeMosaicViewer() {
+  document.body.classList.remove('mosaic-active');
+  // Restore header to last loaded PLY
+  if (currentFilename) {
+    document.getElementById('info-flight').textContent = currentFilename;
+    document.getElementById('info-points').textContent  = '';
+  }
+}
+
+let _mosaicEventsInit = false;
+function _initMosaicEvents() {
+  if (_mosaicEventsInit) return;
+  _mosaicEventsInit = true;
+
+  const wrap = document.getElementById('mosaic-canvas');
+
+  wrap.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect    = wrap.getBoundingClientRect();
+    const cx      = e.clientX - rect.left;
+    const cy      = e.clientY - rect.top;
+    const factor  = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, _mv.scale * factor));
+    _mv.ox = cx - (cx - _mv.ox) * (newScale / _mv.scale);
+    _mv.oy = cy - (cy - _mv.oy) * (newScale / _mv.scale);
+    _mv.scale = newScale;
+    _mvApplyTransform();
+  }, { passive: false });
+
+  wrap.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    _mv.dragging = true; _mv.lastX = e.clientX; _mv.lastY = e.clientY;
+    wrap.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!_mv.dragging) return;
+    _mv.ox += e.clientX - _mv.lastX; _mv.oy += e.clientY - _mv.lastY;
+    _mv.lastX = e.clientX; _mv.lastY = e.clientY;
+    _mvApplyTransform();
+  });
+  window.addEventListener('mouseup', () => {
+    _mv.dragging = false; wrap.classList.remove('dragging');
+  });
+
+  let _lastTouchDist = null;
+  wrap.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) {
+      _mv.dragging = true; _mv.lastX = e.touches[0].clientX; _mv.lastY = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+      _lastTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    }
+  }, { passive: true });
+  wrap.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && _mv.dragging) {
+      _mv.ox += e.touches[0].clientX - _mv.lastX; _mv.oy += e.touches[0].clientY - _mv.lastY;
+      _mv.lastX = e.touches[0].clientX; _mv.lastY = e.touches[0].clientY;
+      _mvApplyTransform();
+    } else if (e.touches.length === 2 && _lastTouchDist) {
+      const dist  = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      const factor = dist / _lastTouchDist; _lastTouchDist = dist;
+      const rect   = wrap.getBoundingClientRect();
+      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+      const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, _mv.scale * factor));
+      _mv.ox = cx - (cx - _mv.ox) * (newScale / _mv.scale);
+      _mv.oy = cy - (cy - _mv.oy) * (newScale / _mv.scale);
+      _mv.scale = newScale; _mvApplyTransform();
+    }
+  }, { passive: false });
+  wrap.addEventListener('touchend', () => { _mv.dragging = false; _lastTouchDist = null; }, { passive: true });
+  wrap.addEventListener('dblclick', _mvFitToView);
+}
+
+function closeMosaicViewer() {
+  document.body.classList.remove('mosaic-active');
+  if (currentFilename) {
+    document.getElementById('info-flight').textContent = currentFilename;
+    document.getElementById('info-points').textContent  = '';
+  }
+}
+window.closeMosaicViewer = closeMosaicViewer;
+
+// Keep toggleMosaicZoom as a no-op for any lingering references
+function toggleMosaicZoom() {}
+window.toggleMosaicZoom = toggleMosaicZoom;
 async function loadLocalPLY(file) {
   setStatus('loading', 'LOADING');
   currentFilename = file.name;
@@ -2096,7 +2568,235 @@ function setStatus(cls, text) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// TAB SWITCHING
+// ORTHO LOCAL MAP — Leaflet with File API blob URLs for local tile serving
+// ══════════════════════════════════════════════════════════════════════════════
+let orthoMap        = null;
+let orthoTileBlobs  = {};   // "z/x/y" → object URL (created from File objects)
+let orthoMetaCache  = null;
+
+// Called from folder load or manual ortho_metadata.json picker
+async function initLocalOrthoMap(meta, tileFiles) {
+  if (typeof L === 'undefined') {
+    document.getElementById('ortho-placeholder').style.display = 'flex';
+    document.getElementById('ortho-placeholder').querySelector('small').textContent =
+      'Leaflet unavailable — no internet connection. Ortho map requires Leaflet JS to render.';
+    console.warn('[Ortho] Leaflet not loaded — offline?');
+    return;
+  }
+  orthoMetaCache = meta;
+
+  // Revoke previous blob URLs to avoid memory leak
+  Object.values(orthoTileBlobs).forEach(u => URL.revokeObjectURL(u));
+  orthoTileBlobs = {};
+
+  // Create blob URLs for every tile File object
+  for (const [key, file] of Object.entries(tileFiles)) {
+    orthoTileBlobs[key] = URL.createObjectURL(file);
+  }
+
+  // Update info bar
+  document.getElementById('ortho-session-label').textContent = meta.session_id || 'local';
+  const modeStr  = meta.mode   ? meta.mode.toUpperCase() : 'FAST';
+  const frameStr = meta.frame_count ? `${meta.frame_count} frames` : '';
+  const tileStr  = `${Object.keys(orthoTileBlobs).length} tiles loaded`;
+  document.getElementById('ortho-meta-text').textContent =
+    [modeStr, frameStr, tileStr].filter(Boolean).join('  ·  ');
+
+  document.getElementById('ortho-placeholder').style.display = 'none';
+
+  // Destroy previous Leaflet instance
+  if (orthoMap) { orthoMap.remove(); orthoMap = null; }
+
+  const bounds   = meta.bounds;
+  const center   = bounds
+    ? [(bounds.lat_min + bounds.lat_max) / 2, (bounds.lon_min + bounds.lon_max) / 2]
+    : [18.2, -67.1];   // UPRM Mayagüez fallback
+  const initZoom = bounds
+    ? Math.max((meta.zoom_max || 19) - 2, meta.zoom_min || 14)
+    : 15;
+
+  orthoMap = L.map('ortho-map', {
+    center:  center,
+    zoom:    initZoom,
+    minZoom: meta.zoom_min || 14,
+    maxZoom: meta.zoom_max || 19,
+  });
+
+  // OSM basemap — loads when internet available, silently absent offline.
+  // Probe connectivity with a single tile request; on failure remove the layer
+  // so the dark canvas background shows through (no broken tile icons).
+  _addOsmBasemapIfOnline(orthoMap);
+
+  // Custom tile layer using blob URLs resolved from tileFiles dict
+  const LocalTileLayer = L.TileLayer.extend({
+    createTile(coords, done) {
+      const img = document.createElement('img');
+      const key = `${coords.z}/${coords.x}/${coords.y}`;
+      const blobUrl = orthoTileBlobs[key];
+      if (blobUrl) {
+        img.src = blobUrl;
+        img.onload  = () => done(null, img);
+        img.onerror = () => done('missing tile', img);
+      } else {
+        // Tile not in loaded set — transparent placeholder
+        img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        done(null, img);
+      }
+      return img;
+    }
+  });
+
+  new LocalTileLayer('', {
+    minZoom: meta.zoom_min || 14,
+    maxZoom: meta.zoom_max || 19,
+    tms: false,
+  }).addTo(orthoMap);
+
+  // Bounds rectangle
+  if (bounds) {
+    const b = [[bounds.lat_min, bounds.lon_min], [bounds.lat_max, bounds.lon_max]];
+    L.rectangle(b, { color: '#4a9eff', weight: 1, fill: false, dashArray: '4 4', opacity: 0.5 }).addTo(orthoMap);
+    orthoMap.fitBounds(b, { padding: [20, 20] });
+  }
+
+  // Cursor coords
+  orthoMap.on('mousemove', e => {
+    document.getElementById('ortho-coords-display').textContent =
+      `${e.latlng.lat.toFixed(6)}°N  ${e.latlng.lng.toFixed(6)}°E`;
+  });
+  orthoMap.on('mouseout', () => {
+    document.getElementById('ortho-coords-display').textContent = '';
+  });
+
+  orthoMap._needsInvalidate = true;
+}
+
+// Manual ortho_metadata.json picker (used when user clicks the load button)
+document.getElementById('ortho-meta-input').addEventListener('change', async (e) => {
+  const metaFile = e.target.files[0];
+  if (!metaFile) return;
+
+  try {
+    const meta = JSON.parse(await metaFile.text());
+    // For manual load we have no tile files — show no-tiles warning
+    orthoMetaCache = meta;
+    document.getElementById('ortho-session-label').textContent = meta.session_id || 'local';
+    document.getElementById('ortho-meta-text').textContent =
+      'ortho_metadata.json loaded — open the session FOLDER (📁) to load tiles';
+    document.getElementById('ortho-placeholder').style.display = 'flex';
+    document.getElementById('ortho-placeholder').querySelector('small').textContent =
+      'Tiles not loaded. Use 📁 Folder to open the full session directory.';
+  } catch (err) {
+    console.warn('[Ortho] Invalid ortho_metadata.json:', err);
+  }
+});
+
+// Connectivity-aware OSM basemap.
+// Fetches a single known-good OSM tile to test internet access.
+// If the request succeeds within 3s the basemap is added at 35% opacity.
+// If it fails (offline, hotspot with no upstream, DNS fail) the layer is
+// never added — no broken tile icons, no console errors visible to the user.
+function _addOsmBasemapIfOnline(map) {
+  const probe = new Image();
+  const probeUrl = 'https://tile.openstreetmap.org/0/0/0.png';
+  let settled = false;
+
+  const add = () => {
+    if (settled) return;
+    settled = true;
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      opacity:     0.35,
+      maxZoom:     19,
+    }).addTo(map);
+  };
+
+  const skip = () => {
+    if (settled) return;
+    settled = true;
+    // No basemap — ortho imagery renders on dark background
+  };
+
+  probe.onload  = add;
+  probe.onerror = skip;
+  // 3 s timeout — avoids hanging on captive portals
+  setTimeout(skip, 3000);
+  probe.src = probeUrl;
+}
+
+function _orthoTabActivated() {
+  if (!orthoMap) {
+    document.getElementById('ortho-placeholder').style.display = 'flex';
+    return;
+  }
+  if (orthoMap._needsInvalidate) {
+    orthoMap.invalidateSize();
+    orthoMap._needsInvalidate = false;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORTHO DRAPE — orthophoto ground plane in the 3D viewer
+// Loads mosaic.jpg as a THREE.PlaneGeometry textured quad positioned at Z_min
+// of the current point cloud, scaled to match GPS geographic bounds.
+// ══════════════════════════════════════════════════════════════════════════════
+let orthoDrapeMesh  = null;   // THREE.Mesh or null
+let orthoDrapeOn    = false;
+let orthoDrapeGeo   = null;   // GPS bounds from ortho_metadata.json
+let orthoDrapeImgFile = null; // mosaic.jpg File object from folder load
+
+function _registerOrthoDrapeAssets(metaObj, mosaicFile) {
+  orthoDrapeGeo     = metaObj.bounds;
+  orthoDrapeImgFile = mosaicFile;
+  _orthoMeta        = metaObj;   // used by mosaic info panel
+}
+
+async function toggleOrthoDrape() {
+  if (orthoDrapeOn) {
+    if (orthoDrapeMesh) {
+      scene.remove(orthoDrapeMesh);
+      orthoDrapeMesh.geometry.dispose();
+      orthoDrapeMesh.material.map.dispose();
+      orthoDrapeMesh.material.dispose();
+      orthoDrapeMesh = null;
+    }
+    orthoDrapeOn = false;
+    return;
+  }
+
+  if (!orthoDrapeImgFile) return;
+
+  const blobUrl = URL.createObjectURL(orthoDrapeImgFile);
+  const loader  = new THREE.TextureLoader();
+
+  loader.load(blobUrl, (texture) => {
+    URL.revokeObjectURL(blobUrl);
+
+    let planeW = 100, planeH = 100, planeZ = 0;
+    if (currentMesh && boundingBox) {
+      const box = boundingBox;
+      planeW = box.max.x - box.min.x;
+      planeH = box.max.y - box.min.y;
+      planeZ = box.min.z - 0.1;
+    }
+
+    const geo = new THREE.PlaneGeometry(planeW, planeH);
+    const mat = new THREE.MeshBasicMaterial({
+      map: texture, transparent: true, opacity: 0.75,
+      depthWrite: false, side: THREE.DoubleSide,
+    });
+
+    orthoDrapeMesh = new THREE.Mesh(geo, mat);
+    orthoDrapeMesh.rotation.x = -Math.PI / 2;
+    orthoDrapeMesh.position.y = planeZ;
+    scene.add(orthoDrapeMesh);
+    orthoDrapeOn = true;
+  }, undefined, (err) => {
+    URL.revokeObjectURL(blobUrl);
+    console.error('[OrthoDrape] Failed to load mosaic texture:', err);
+  });
+}
+window.toggleOrthoDrape = toggleOrthoDrape;
 // ══════════════════════════════════════════════════════════════════════════════
 let currentTab = 'viewer';
 
@@ -2104,23 +2804,31 @@ function switchTab(tab) {
   currentTab = tab;
   document.body.className = `tab-${tab}`;
 
+  // Always dismiss mosaic viewer when switching tabs
+  closeMosaicViewer();
+
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`tab-${tab}-btn`).classList.add('active');
 
-  const liveContent = document.getElementById('live-tab-content');
+  const liveContent  = document.getElementById('live-tab-content');
   const liveStatsBar = document.getElementById('live-stats-bar');
+  const orthoContent = document.getElementById('ortho-tab-content');
+
+  liveContent.classList.remove('active');
+  orthoContent.classList.remove('active');
+  liveStatsBar.style.display = 'none';
 
   if (tab === 'live') {
     liveContent.classList.add('active');
     liveStatsBar.style.display = 'flex';
-    // Auto-connect if input has value and not yet connected
     if (!fgConnected && document.getElementById('fg-ws-input').value) {
       connectFoxglove();
     }
+  } else if (tab === 'ortho') {
+    orthoContent.classList.add('active');
+    setTimeout(_orthoTabActivated, 50);
   } else {
-    liveContent.classList.remove('active');
-    liveStatsBar.style.display = 'none';
-    setTimeout(onResize, 50); // restore 3D canvas after tab switch
+    setTimeout(onResize, 50);
   }
 }
 window.switchTab = switchTab;

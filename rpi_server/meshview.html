@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DronePi · Unified Ground Station</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -618,6 +619,84 @@
   }
   body.sidebar-open #controls-hint { right: 376px; }
 
+  /* ── Ortho slippy-map tab ── */
+  #ortho-tab-content {
+    display: none;
+    position: fixed;
+    top: 48px; left: 0; right: 0; bottom: 0;
+    flex-direction: column;
+    z-index: 90;
+  }
+  #ortho-tab-content.active { display: flex; }
+  #ortho-info-bar {
+    height: 34px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 1px solid #1e2a3a;
+    flex-shrink: 0;
+    font-size: 9px;
+    color: #4a6a8a;
+    letter-spacing: 1px;
+    background: rgba(10,12,16,0.97);
+    z-index: 1000;
+  }
+  #ortho-session-id {
+    font-family: 'Courier New', monospace;
+    color: #4a9eff;
+    letter-spacing: 1px;
+  }
+  #ortho-meta-text { color: #3a5a7a; flex: 1; }
+  #ortho-coords-display {
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    color: #4adf8a;
+    letter-spacing: 0.5px;
+    min-width: 260px;
+    text-align: right;
+  }
+  #ortho-no-data {
+    position: absolute;
+    inset: 34px 0 0 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: #0a0c10;
+    color: #2a4a6a;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    z-index: 5;
+  }
+  #ortho-no-data small { font-size: 9px; letter-spacing: 1px; color: #1e3050; }
+  #ortho-map {
+    flex: 1;
+    /* Leaflet needs explicit background to avoid flash */
+    background: #0e131a;
+  }
+  /* Override Leaflet attribution to match dark theme */
+  .leaflet-control-attribution {
+    background: rgba(10,12,16,0.8) !important;
+    color: #3a5a7a !important;
+    font-size: 8px !important;
+  }
+  .leaflet-control-attribution a { color: #4a7aaa !important; }
+  /* Tab visibility — hide 3D elements when on ortho tab */
+  body.tab-ortho #canvas-wrap,
+  body.tab-ortho #overlay,
+  body.tab-ortho #view-cube-wrap,
+  body.tab-ortho #stats-bar,
+  body.tab-ortho #info-panel,
+  body.tab-ortho #measure-panel,
+  body.tab-ortho #controls-hint,
+  body.tab-ortho #sidebar,
+  body.tab-ortho #point-info,
+  body.tab-ortho #live-tab-content,
+  body.tab-ortho #live-stats-bar { display:none !important; }
+
   /* ══════════════════════════════════════════════
      TAB SYSTEM
   ══════════════════════════════════════════════ */
@@ -831,6 +910,7 @@
   <div id="tab-bar">
     <button class="tab-btn active" id="tab-viewer-btn" onclick="switchTab('viewer')">◈ 3D Viewer</button>
     <button class="tab-btn" id="tab-live-btn" onclick="switchTab('live')"><span class="tab-dot"></span>Live Feed</button>
+    <button class="tab-btn" id="tab-ortho-btn" onclick="switchTab('ortho')">🗺 Ortho Map</button>
   </div>
   <div class="divider"></div>
   
@@ -1161,6 +1241,23 @@
   <div class="stat"><span class="stat-label">Uptime</span><span class="stat-value" id="live-uptime">—</span></div>
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════════
+     ORTHO TAB — Leaflet slippy map
+═══════════════════════════════════════════════════════════════ -->
+<div id="ortho-tab-content">
+  <div id="ortho-info-bar">
+    <span id="ortho-session-id">—</span>
+    <span id="ortho-meta-text">No ortho data — run postprocess_ortho.py after a flight</span>
+    <span id="ortho-coords-display"></span>
+  </div>
+  <div id="ortho-no-data">
+    <span>No ortho mosaic available</span>
+    <small>Run postprocess_ortho.py after a flight to generate tiles.</small>
+  </div>
+  <div id="ortho-map"></div>
+</div>
+
+<script src="/leaflet.min.js"></script>
 <script src="/three.min.js"></script>
 <script src="/PLYLoader.js"></script>
 
@@ -2321,6 +2418,8 @@ async function pollPiServer() {
 // Start polling
 pollPiServer();
 setInterval(pollPiServer, POLL_INTERVAL_MS);
+pollOrthoMosaic();
+setInterval(pollOrthoMosaic, POLL_INTERVAL_MS);
 
 // Pre-fetch flight DB on load to populate header dropdown
 fetchFlightDB().catch(() => {});
@@ -2335,6 +2434,170 @@ function setStatus(cls, text) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ORTHO SLIPPY MAP — Leaflet tile viewer
+// Polls ortho_metadata.json every POLL_INTERVAL_MS alongside latest.json.
+// When available, populates the Ortho Map tab with a Leaflet tile layer
+// using the XYZ pyramid produced by TileCutter.
+// ══════════════════════════════════════════════════════════════════════════════
+let orthoMap         = null;   // Leaflet map instance (null until first init)
+let orthoTileLayer   = null;   // Current tile layer
+let lastOrthoSession = null;   // session_id of last loaded ortho
+
+async function pollOrthoMosaic() {
+  try {
+    const resp = await fetch(`${PI_BASE_URL}/ortho_metadata.json`, { cache: 'no-store' });
+    if (!resp.ok) return;
+    const meta = await resp.json();
+
+    // Skip if session unchanged
+    if (meta.session_id === lastOrthoSession) return;
+    lastOrthoSession = meta.session_id;
+
+    // Update info bar
+    document.getElementById('ortho-session-id').textContent = meta.session_id;
+    const modeStr    = meta.mode    ? meta.mode.toUpperCase() + ' path' : '';
+    const frameStr   = meta.frame_count ? `${meta.frame_count} frames` : '';
+    const colStr     = meta.collage_fallback ? '  ⚠ collage (stitcher failed)' : '';
+    document.getElementById('ortho-meta-text').textContent =
+      [modeStr, frameStr, colStr].filter(Boolean).join('  ·  ');
+
+    // Show/hide no-data placeholder
+    const noData = document.getElementById('ortho-no-data');
+    noData.style.display = 'none';
+
+    // Build tile URL — PI_BASE_URL prefix required because tile paths are
+    // relative to serve.py root (rosbags/<session>/ortho/tiles/{z}/{x}/{y}.png)
+    const tileUrl = `${PI_BASE_URL}/${meta.tile_url}`;
+
+    _initOrthoMap(meta, tileUrl);
+
+  } catch (_) {
+    // ortho_metadata.json absent — leave tab in no-data state
+  }
+}
+
+function _initOrthoMap(meta, tileUrl) {
+  if (typeof L === 'undefined') {
+    document.getElementById('ortho-no-data').style.display = 'flex';
+    document.getElementById('ortho-no-data').querySelector('small').textContent =
+      'Leaflet unavailable — no internet connection on first load. Ortho map requires Leaflet JS.';
+    console.warn('[Ortho] Leaflet not loaded — offline?');
+    return;
+  }
+  const mapEl = document.getElementById('ortho-map');
+
+  // Derive initial bounds / center from GPS or use world default
+  let bounds    = null;
+  let center    = [20, 0];
+  let initZoom  = 2;
+
+  if (meta.bounds) {
+    const b = meta.bounds;
+    bounds   = [[b.lat_min, b.lon_min], [b.lat_max, b.lon_max]];
+    center   = [(b.lat_min + b.lat_max) / 2, (b.lon_min + b.lon_max) / 2];
+    initZoom = meta.zoom_max ? Math.max(meta.zoom_max - 2, meta.zoom_min || 14) : 17;
+  }
+
+  // Destroy previous map instance before re-init to avoid Leaflet
+  // "Map container is already initialized" error on session change.
+  if (orthoMap) {
+    orthoMap.remove();
+    orthoMap      = null;
+    orthoTileLayer = null;
+  }
+
+  orthoMap = L.map('ortho-map', {
+    center:  center,
+    zoom:    initZoom,
+    minZoom: meta.zoom_min || 14,
+    maxZoom: meta.zoom_max || 19,
+    // Disable world wrapping — ortho tiles are local, not global
+    maxBoundsViscosity: 1.0,
+  });
+
+  // OSM basemap — loads when internet available, silently absent offline.
+  _addOsmBasemapIfOnline(orthoMap);
+
+  // Ortho tile layer — XYZ from TileCutter
+  orthoTileLayer = L.tileLayer(tileUrl, {
+    attribution:  `DronePi ortho · ${meta.session_id}`,
+    minZoom:      meta.zoom_min || 14,
+    maxZoom:      meta.zoom_max || 19,
+    tms:          false,    // TileCutter uses --xyz (Google/Leaflet convention)
+    opacity:      1.0,
+    errorTileUrl: '',       // Silently skip missing tiles at boundary
+  }).addTo(orthoMap);
+
+  // Fit to bounds if GPS data is available
+  if (bounds) {
+    orthoMap.fitBounds(bounds, { padding: [20, 20] });
+  }
+
+  // Bounds overlay rectangle (visual reference)
+  if (bounds) {
+    L.rectangle(bounds, {
+      color:     '#4a9eff',
+      weight:    1,
+      fill:      false,
+      dashArray: '4 4',
+      opacity:   0.5,
+    }).addTo(orthoMap);
+  }
+
+  // Live cursor coordinates in info bar
+  orthoMap.on('mousemove', (e) => {
+    const { lat, lng } = e.latlng;
+    document.getElementById('ortho-coords-display').textContent =
+      `${lat.toFixed(6)}°N  ${lng.toFixed(6)}°E`;
+  });
+  orthoMap.on('mouseout', () => {
+    document.getElementById('ortho-coords-display').textContent = '';
+  });
+
+  // Invalidate size when the tab becomes visible — Leaflet needs this
+  // because the container has zero size while the tab is hidden.
+  orthoMap._needsInvalidate = true;
+}
+
+// Connectivity-aware OSM basemap.
+// Probes internet access with a single tile fetch. Adds OSM at 35% opacity
+// if online, silently skips if offline — no broken tiles, no errors.
+function _addOsmBasemapIfOnline(map) {
+  const probe = new Image();
+  let settled  = false;
+
+  const add = () => {
+    if (settled) return;
+    settled = true;
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      opacity:     0.35,
+      maxZoom:     19,
+    }).addTo(map);
+  };
+
+  const skip = () => { settled = true; };
+
+  probe.onload  = add;
+  probe.onerror = skip;
+  setTimeout(skip, 3000);
+  probe.src = 'https://tile.openstreetmap.org/0/0/0.png';
+}
+
+// Called from switchTab when switching to 'ortho'
+function _orthoTabActivated() {
+  if (!orthoMap) {
+    // No data yet — show placeholder
+    document.getElementById('ortho-no-data').style.display = 'flex';
+    return;
+  }
+  if (orthoMap._needsInvalidate) {
+    orthoMap.invalidateSize();
+    orthoMap._needsInvalidate = false;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // TAB SWITCHING
 // ══════════════════════════════════════════════════════════════════════════════
 let currentTab = 'viewer';
@@ -2346,24 +2609,33 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`tab-${tab}-btn`).classList.add('active');
 
-  const liveContent = document.getElementById('live-tab-content');
+  const liveContent  = document.getElementById('live-tab-content');
   const liveStatsBar = document.getElementById('live-stats-bar');
+  const orthoContent = document.getElementById('ortho-tab-content');
+
+  // Hide all tab panels first
+  liveContent.classList.remove('active');
+  orthoContent.classList.remove('active');
+  liveStatsBar.style.display = 'none';
 
   if (tab === 'live') {
     liveContent.classList.add('active');
     liveStatsBar.style.display = 'flex';
-    // Reconnect if the WS dropped while on the 3D viewer tab
     if (!fgConnected) {
       const wsUrl = document.getElementById('fg-ws-input').value;
       if (wsUrl) connectTelemetryWs(wsUrl);
     }
+  } else if (tab === 'ortho') {
+    orthoContent.classList.add('active');
+    // Leaflet needs a size invalidation after the container becomes visible
+    setTimeout(_orthoTabActivated, 50);
   } else {
-    liveContent.classList.remove('active');
-    liveStatsBar.style.display = 'none';
-    setTimeout(onResize, 50); // restore 3D canvas after tab switch
+    // viewer tab — restore Three.js canvas
+    setTimeout(onResize, 50);
   }
 }
 window.switchTab = switchTab;
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // FOXGLOVE LAUNCHER — opens Foxglove in new tab, telemetry panel via WebSocket

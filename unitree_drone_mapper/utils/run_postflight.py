@@ -3,9 +3,16 @@
 run_postflight.py — Post-flight pipeline trigger for DronePi.
 
 Finds the most recent completed bag session and runs postprocess_mesh.py
-against it, which generates the point cloud and Poisson mesh (if enough
-points), copies both to /mnt/ssd/maps/, writes metadata.json and
-latest.json, and triggers the browser viewer to auto-load within 10s.
+followed by postprocess_ortho.py against it.
+
+postprocess_mesh.py generates the point cloud and mesh (if enough points),
+copies both to /mnt/ssd/maps/, writes metadata.json and latest.json, and
+triggers the browser viewer to auto-load within 10s.
+
+postprocess_ortho.py generates the orthomosaic tile pyramid from flight
+camera frames, writes ortho_metadata.json for the meshview.html Ortho tab.
+The ortho pipeline runs non-fatally — a failure does not affect the mesh
+pipeline exit code.
 
 Mesh decision is delegated entirely to postprocess_mesh.py:
     points >= POISSON_MIN_POINTS (10k) -> cloud + mesh
@@ -17,6 +24,7 @@ Manual (run after landing):
     python3 run_postflight.py
     python3 run_postflight.py --bag /mnt/ssd/rosbags/scan_20260317_091400
     python3 run_postflight.py --latest   # explicit latest-bag mode
+    python3 run_postflight.py --no-ortho # skip ortho pipeline
 
 Auto (called by drone_watchdog.py on deactivation):
     python3 run_postflight.py --auto
@@ -29,8 +37,11 @@ Options
                    0 = success
                    1 = no bag found
                    2 = postprocess_mesh.py failed
+                   (ortho failure never changes the exit code)
 --maps-dir       Override maps directory (default: /mnt/ssd/maps)
 --skip-wait      Skip the bag-close wait (use if bag is already closed)
+--no-ortho       Skip postprocess_ortho.py even if frames are available
+--fast-ortho     Pass --fast to postprocess_ortho.py
 """
 
 import argparse
@@ -44,9 +55,10 @@ from pathlib import Path
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-ROSBAG_DIR       = Path("/mnt/ssd/rosbags")
-MAPS_DIR         = Path("/mnt/ssd/maps")
+ROSBAG_DIR         = Path("/mnt/ssd/rosbags")
+MAPS_DIR           = Path("/mnt/ssd/maps")
 POSTPROCESS_SCRIPT = Path(__file__).parent / "postprocess_mesh.py"
+ORTHO_SCRIPT       = Path(__file__).parent / "postprocess_ortho.py"
 
 # Bag directory name pattern: scan_YYYYMMDD_HHMMSS
 BAG_DIR_RE = re.compile(
@@ -57,6 +69,9 @@ BAG_DIR_RE = re.compile(
 # after the watchdog sends SIGINT. The watchdog's GRACEFUL_KILL_S is 5s
 # so waiting 8s here gives it comfortable margin.
 BAG_CLOSE_WAIT_S = 8
+
+# Flight frames directory name written by camera_capture.py
+FRAMES_SUBDIR = "flight_frames"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -119,7 +134,7 @@ def run_postprocess(bag_path: Path, maps_dir: Path, auto: bool) -> int:
     cmd = [
         sys.executable,
         str(POSTPROCESS_SCRIPT),
-        "--bag",    str(bag_path),
+        "--bag",      str(bag_path),
         "--maps-dir", str(maps_dir),
     ]
     if auto:
@@ -129,22 +144,75 @@ def run_postprocess(bag_path: Path, maps_dir: Path, auto: bool) -> int:
     result = subprocess.run(cmd)
     return result.returncode
 
+
+def run_ortho(bag_path: Path, maps_dir: Path, auto: bool, fast: bool) -> int:
+    """
+    Run postprocess_ortho.py against the given session.
+
+    camera_capture.py writes flight frames to:
+        /mnt/ssd/maps/<session_id>/flight_frames/
+    (controlled by FLIGHT_BASE_DIR in camera_capture.py)
+
+    The session_id is derived from the bag directory name so the two paths
+    are always in sync as long as the watchdog passes the same session_id
+    to both camera_capture and the rosbag recorder.
+
+    Returns the subprocess exit code, or -1 if skipped.
+    """
+    if not ORTHO_SCRIPT.exists():
+        log("[ORTHO] postprocess_ortho.py not found — skipping.")
+        return -1
+
+    session_id = bag_path.name
+    frames_dir = CAMERA_BASE_DIR / session_id / FRAMES_SUBDIR
+
+    if not frames_dir.exists():
+        log(f"[ORTHO] No flight_frames/ at {frames_dir} — skipping ortho.")
+        return -1
+
+    frame_count = sum(
+        1 for f in frames_dir.iterdir()
+        if f.suffix.lower() in ('.jpg', '.jpeg', '.png')
+    )
+    if frame_count == 0:
+        log(f"[ORTHO] flight_frames/ is empty — skipping ortho.")
+        return -1
+
+    log(f"[ORTHO] {frame_count} frames found — starting ortho pipeline...")
+
+    cmd = [
+        sys.executable,
+        str(ORTHO_SCRIPT),
+        "--session",    str(bag_path),
+        "--maps-dir",   str(maps_dir),
+    ]
+    if fast:
+        cmd.append("--fast")
+
+    log(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd)
+    return result.returncode
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Post-flight pipeline trigger — finds latest bag and processes it."
+        description="Post-flight pipeline trigger — mesh + ortho."
     )
-    parser.add_argument("--bag",       default=None,
+    parser.add_argument("--bag",        default=None,
                         help="Process a specific bag directory")
-    parser.add_argument("--latest",    action="store_true",
+    parser.add_argument("--latest",     action="store_true",
                         help="Process the most recent bag (default)")
-    parser.add_argument("--auto",      action="store_true",
+    parser.add_argument("--auto",       action="store_true",
                         help="Non-interactive mode for watchdog integration")
-    parser.add_argument("--maps-dir",  default=str(MAPS_DIR),
+    parser.add_argument("--maps-dir",   default=str(MAPS_DIR),
                         help=f"Maps directory (default: {MAPS_DIR})")
-    parser.add_argument("--skip-wait", action="store_true",
+    parser.add_argument("--skip-wait",  action="store_true",
                         help="Skip bag-close wait (bag already closed)")
+    parser.add_argument("--no-ortho",   action="store_true",
+                        help="Skip postprocess_ortho.py")
+    parser.add_argument("--fast-ortho", action="store_true",
+                        help="Pass --fast to postprocess_ortho.py")
     args = parser.parse_args()
 
     maps_dir = Path(args.maps_dir)
@@ -189,22 +257,35 @@ def main():
         log(f"       Mount SSD first: sudo mount -a")
         sys.exit(1)
 
-    # ── run postprocess_mesh.py ───────────────────────────────────────────────
+    # ── [1/2] Mesh pipeline ───────────────────────────────────────────────────
     log("Starting post-flight mesh pipeline...")
     log("(Mesh will be generated if point count >= 10,000 after downsampling)")
 
-    rc = run_postprocess(bag_path, maps_dir, args.auto)
+    rc_mesh = run_postprocess(bag_path, maps_dir, args.auto)
 
-    if rc == 0:
-        log("=" * 55)
-        log("Post-flight pipeline complete.")
-        log(f"Viewer   : http://10.42.0.1:8080/meshview.html")
-        log("Browser auto-loads mesh within 10s.")
-        log("=" * 55)
-        sys.exit(0)
-    else:
-        log(f"[FAIL] postprocess_mesh.py exited with code {rc}")
+    if rc_mesh != 0:
+        log(f"[FAIL] postprocess_mesh.py exited with code {rc_mesh}")
         sys.exit(2)
+
+    # ── [2/2] Ortho pipeline ──────────────────────────────────────────────────
+    if args.no_ortho:
+        log("[ORTHO] Skipped (--no-ortho).")
+    else:
+        rc_ortho = run_ortho(bag_path, maps_dir, args.auto, args.fast_ortho)
+        if rc_ortho == 0:
+            log("[ORTHO] Ortho pipeline complete.")
+        elif rc_ortho == -1:
+            pass   # already logged reason for skip
+        else:
+            log(f"[ORTHO] postprocess_ortho.py exited with code {rc_ortho} — non-fatal.")
+
+    # ── done ──────────────────────────────────────────────────────────────────
+    log("=" * 55)
+    log("Post-flight pipeline complete.")
+    log(f"Viewer   : http://10.42.0.1:8080/meshview.html")
+    log("Browser auto-loads mesh within 10s.")
+    log("=" * 55)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

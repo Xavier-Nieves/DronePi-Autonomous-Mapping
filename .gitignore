@@ -959,3 +959,10 @@ unitree_drone_mapper/data/scan_aukerman/metadata.json
 unitree_drone_mapper/data/scan_aukerman/ortho_metadata.json
 unitree_drone_mapper/data/scan_aukerman/scan_20260424_231444_cloud.ply
 unitree_drone_mapper/data/scan_aukerman/textured_mesh.ply
+ground_station_app/dronepi_ground.egg-info/dependency_links.txt
+ground_station_app/dronepi_ground.egg-info/entry_points.txt
+ground_station_app/dronepi_ground.egg-info/PKG-INFO
+ground_station_app/dronepi_ground.egg-info/requires.txt
+ground_station_app/dronepi_ground.egg-info/SOURCES.txt
+ground_station_app/dronepi_ground.egg-info/top_level.txt
+ground_station_app/DronePi Ground Station.pyw

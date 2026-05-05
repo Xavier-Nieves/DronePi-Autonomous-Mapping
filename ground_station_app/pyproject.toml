@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dronepi-ground"
+version = "0.1.0"
+description = "DronePi ground station — post-flight LLM report daemon and CLI"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "httpx>=0.27",
+    "pyulog>=1.0",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+ground-station = "ground_station.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ground_station*"]
+
+# ── Environment variable reference (all tunable parameters) ───────────────────
+#
+# DRONEPI_RPI_HOST          RPi IP or hostname          default: 10.42.0.1
+# DRONEPI_RPI_PORT          RPi HTTP server port         default: 8080
+# DRONEPI_RPI_UPLOAD_TOKEN  Bearer token for PUT /report default: dronepi
+# DRONEPI_OLLAMA_HOST       Ollama base URL              default: http://localhost:11434
+# DRONEPI_OLLAMA_MODEL      Model tag to use             default: qwen2.5:7b
+# DRONEPI_POLL_INTERVAL_S   Daemon poll interval seconds default: 20
+# DRONEPI_CACHE_DIR         Local artifact cache path    default: ~/.dronepi-ground/cache
+# DRONEPI_STATE_FILE        Processed-flight ID store    default: ~/.dronepi-ground/state.json
+# DRONEPI_PID_FILE          Daemon PID file path         default: ~/.dronepi-ground/daemon.pid
+# DRONEPI_LOG_FILE          Daemon log file path         default: ~/.dronepi-ground/daemon.log
+# DRONEPI_OLLAMA_TIMEOUT_S  Ollama read timeout seconds  default: 90

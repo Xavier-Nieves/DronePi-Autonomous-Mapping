@@ -379,7 +379,7 @@ class CORSHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin",  "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         if self.path.endswith("latest.json") or self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -388,6 +388,76 @@ class CORSHandler(SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
         self.end_headers()
+
+    def do_PUT(self):
+        """
+        PUT /rosbags/<session_id>/report.md
+        Authorization: Bearer <token>
+
+        Receives the LLM-generated markdown report from the laptop ground
+        station and writes it to ROSBAG_DIR/<session_id>/report.md.
+
+        Rejects requests that:
+          - are not under /rosbags/
+          - do not end in /report.md  (only reports are writable)
+          - use directory traversal    (..)
+          - fail token auth            (DRONEPI_UPLOAD_TOKEN env var)
+
+        Returns 200 on success, 400/401/403/500 on error.
+        """
+        UPLOAD_TOKEN = os.environ.get("DRONEPI_UPLOAD_TOKEN", "dronepi")
+
+        # ── Auth ──────────────────────────────────────────────────────────────
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {UPLOAD_TOKEN}":
+            self.send_response(401)
+            self.end_headers()
+            logging.warning(f"do_PUT: unauthorised attempt from {self.client_address[0]}")
+            return
+
+        # ── Path validation ───────────────────────────────────────────────────
+        if not self.path.startswith("/rosbags/") or not self.path.endswith("/report.md"):
+            self.send_response(403)
+            self.end_headers()
+            logging.warning(f"do_PUT: rejected path {self.path}")
+            return
+
+        rel = self.path[len("/rosbags/"):]
+        if ".." in rel:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        dest = os.path.join(ROSBAG_DIR, rel)
+
+        # ── Ensure session directory exists ───────────────────────────────────
+        session_dir = os.path.dirname(dest)
+        if not os.path.isdir(session_dir):
+            self.send_response(404)
+            self.end_headers()
+            logging.warning(f"do_PUT: session dir not found: {session_dir}")
+            return
+
+        # ── Read body and write atomically ────────────────────────────────────
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+
+            tmp = dest + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(body)
+            os.replace(tmp, dest)
+
+            self.send_response(200)
+            self.end_headers()
+            logging.info(f"do_PUT: report.md written → {dest} ({length} bytes)")
+        except Exception as exc:
+            logging.error(f"do_PUT: write failed: {exc}")
+            try:
+                self.send_response(500)
+                self.end_headers()
+            except OSError:
+                pass
 
     def do_GET(self):
         # ── /api/flights ──────────────────────────────────────────────────────
@@ -704,6 +774,7 @@ def main():
     logging.info(f"  Event log : http://10.42.0.1:{PORT}/api/logs")
     logging.info(f"  Log hist  : http://10.42.0.1:{PORT}/api/log-history")
     logging.info(f"  Download  : http://10.42.0.1:{PORT}/api/log-download")
+    logging.info(f"  Report PUT: PUT /rosbags/<session>/report.md (Bearer token)")
     logging.info(f"  Press Ctrl+C to stop")
 
     try:

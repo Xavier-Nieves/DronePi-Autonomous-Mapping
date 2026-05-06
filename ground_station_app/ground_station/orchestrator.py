@@ -49,6 +49,7 @@ from ground_station.flight_watcher import FlightWatcher
 from ground_station.ollama_client import OllamaClient, OllamaError
 from ground_station.report_generator import ReportGenerator
 from ground_station.report_publisher import ReportPublisher
+from ground_station.db import FlightDatabase
 
 log = logging.getLogger(__name__)
 
@@ -163,8 +164,7 @@ class FlightReportDaemon:
 
     def _process_flight(self, session_id: str) -> bool:
         """
-        Full pipeline for one flight: fetch → generate → publish.
-
+        Full pipeline for one flight: fetch → generate → publish → persist to DB.
         Returns True if a report was generated and published.
         """
         log.info(f"[Daemon] Processing flight: {session_id}")
@@ -175,8 +175,16 @@ class FlightReportDaemon:
             log.error(f"[Daemon] Artifact fetch failed for {session_id}: {exc}")
             return False
 
+        # Build structured data separately so we can read metrics for the DB
+        # without parsing the files a second time.
         try:
-            report_md = self._generator.generate(session_id, artifact_paths)
+            structured = self._generator.build_structured(session_id, artifact_paths)
+        except Exception as exc:
+            log.error(f"[Daemon] Structured data build failed for {session_id}: {exc}")
+            return False
+
+        try:
+            report_md = self._generator._call_ollama(structured)
         except Exception as exc:
             log.error(f"[Daemon] Report generation failed for {session_id}: {exc}")
             return False
@@ -189,9 +197,39 @@ class FlightReportDaemon:
             self._publisher.publish(session_id, report_md)
         except Exception as exc:
             log.error(f"[Daemon] Publish failed for {session_id}: {exc}")
-            # Report was still saved locally — partial success.
+            # Report saved locally — partial success, still write to DB.
+
+        # ── Persist to local DB ────────────────────────────────────────────────
+        try:
+            db = FlightDatabase()
+            db.upsert_flight(
+                session_id,
+                arm_time_iso      = structured.get("start_time"),
+                duration_s        = structured.get("duration_s"),
+                slam_points       = structured["slam"].get("point_count_final"),
+                drift_estimate_m  = structured["slam"].get("drift_estimate_m"),
+                loop_closures     = structured["slam"].get("loop_closures"),
+                cpu_temp_max_c    = structured["rpi_health"].get("cpu_temp_max_c"),
+                throttling_events = structured["rpi_health"].get("throttling_events"),
+                memory_peak_pct   = structured["rpi_health"].get("memory_peak_pct"),
+                battery_start_v   = structured["battery"].get("start_v"),
+                battery_end_v     = structured["battery"].get("end_v"),
+                battery_min_v     = structured["battery"].get("min_v"),
+                vertex_count      = structured["mesh"].get("vertex_count"),
+                face_count        = structured["mesh"].get("face_count"),
+                anomaly_count     = len(structured.get("anomalies", [])),
+                anomalies         = structured.get("anomalies", []),
+                has_report        = True,
+                report_md         = report_md,
+            )
+            log.info(f"[Daemon] DB upsert complete for {session_id}")
+        except Exception as exc:
+            log.error(f"[Daemon] DB upsert failed for {session_id}: {exc}")
+            # Non-fatal — report still exists locally and on RPi.
 
         return True
+    
+
 
     # ── Private — backoff management ──────────────────────────────────────────
 

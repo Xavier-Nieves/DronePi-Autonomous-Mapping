@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DronePi Ground Station</title>
+<style>
+:root{
+  --bg:#0d1117;--surface:#161b22;--surf2:#1c2128;--border:#30363d;
+  --green:#3fb950;--text:#e6edf3;--muted:#8b949e;--red:#f85149;
+  --yellow:#d29922;--accent:#58a6ff;--sidebar:224px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#topBand{flex-shrink:0}
+#header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 18px;height:48px;display:flex;align-items:center;gap:12px}
+#header img{width:30px;height:30px;border-radius:50%}
+.logo{font-size:15px;font-weight:600;white-space:nowrap}.logo span{color:var(--green)}
+.mesh-btn{display:flex;align-items:center;gap:5px;padding:5px 13px;border-radius:6px;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.3);color:var(--accent);font-size:12px;font-weight:500;text-decoration:none;white-space:nowrap;transition:background .15s}
+.mesh-btn:hover{background:rgba(88,166,255,.2);border-color:var(--accent)}
+#statusPills{margin-left:auto;display:flex;gap:10px;align-items:center}
+.pill{font-size:11px;padding:3px 9px;border-radius:10px;border:1px solid var(--border);display:flex;align-items:center;gap:5px}
+.pill.ok{border-color:var(--green);color:var(--green)}.pill.err{border-color:var(--red);color:var(--red)}.pill.warn{border-color:var(--yellow);color:var(--yellow)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+#kpiStrip{background:var(--surf2);border-bottom:1px solid var(--border);padding:0 18px;height:44px;display:flex;align-items:center;gap:28px}
+.kc{display:flex;align-items:baseline;gap:6px}
+.kc .v{font-size:19px;font-weight:700}
+.kc .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.kc .v.green{color:var(--green)}.kc .v.accent{color:var(--accent)}.kc .v.yellow{color:var(--yellow)}.kc .v.red{color:var(--red)}
+.kdiv{width:1px;height:20px;background:var(--border)}
+#body{display:flex;flex:1;overflow:hidden}
+#sidebar{width:var(--sidebar);background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden}
+#sbhdr{padding:9px 14px;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0}
+.rib{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:1px 4px;border-radius:4px}.rib:hover{background:var(--border);color:var(--text)}
+#flist{overflow-y:auto;flex:1}
+.fi{padding:8px 14px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .12s;display:flex;flex-direction:column;gap:2px}
+.fi:hover{background:rgba(255,255,255,.03)}.fi.active{background:rgba(63,185,80,.07);border-left:3px solid var(--green);padding-left:11px}
+.fi-id{font-size:11px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fi-meta{font-size:10px;color:var(--muted)}
+.badge{display:inline-block;font-size:9px;padding:1px 4px;border-radius:3px;margin-left:4px;vertical-align:middle}
+.badge.rpt{background:rgba(88,166,255,.15);color:var(--accent)}
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#tabBar{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface);padding:0 18px}
+.tab{padding:10px 16px;font-size:12px;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.06em}
+.tab:hover{color:var(--text)}.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+#mainContent{flex:1;overflow-y:auto;padding:22px 24px}
+#dashView{display:flex;flex-direction:column;gap:18px}
+
+/* Fleet summary */
+#fleetCard{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 20px;display:flex;gap:14px;align-items:flex-start}
+#fleetIcon{font-size:22px;flex-shrink:0;margin-top:2px}
+#fleetBody{flex:1}
+#fleetTitle{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:6px}
+#fleetText{font-size:13px;line-height:1.6;color:var(--text)}
+#fleetRefresh{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:4px;flex-shrink:0}
+#fleetRefresh:hover{background:var(--border);color:var(--text)}
+
+/* Section headers */
+.sec{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.sec::after{content:"";flex:1;height:1px;background:var(--border)}
+
+/* KPI grid */
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.kc-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:5px}
+.kc-val{font-size:26px;font-weight:700}
+.kc-val.green{color:var(--green)}.kc-val.accent{color:var(--accent)}.kc-val.yellow{color:var(--yellow)}.kc-val.red{color:var(--red)}
+.kc-sub{font-size:10px;color:var(--muted);margin-top:3px}
+
+/* Pipeline bottleneck card */
+#pipelineCard{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 20px}
+.pipe-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:12px}
+.pipe-stages{display:flex;flex-direction:column;gap:6px}
+.pipe-row{display:flex;align-items:center;gap:10px;font-size:12px}
+.pipe-name{width:130px;color:var(--muted);flex-shrink:0;font-size:11px}
+.pipe-bar-wrap{flex:1;background:var(--surf2);border-radius:3px;height:8px;overflow:hidden}
+.pipe-bar{height:100%;border-radius:3px;background:var(--accent);transition:width .4s}
+.pipe-bar.hot{background:var(--red)}.pipe-bar.warm{background:var(--yellow)}
+.pipe-time{width:44px;text-align:right;font-size:11px;color:var(--muted);flex-shrink:0}
+.pipe-badge{font-size:9px;padding:1px 5px;border-radius:3px;flex-shrink:0}
+.pipe-badge.bottleneck{background:rgba(248,81,73,.15);color:var(--red)}
+
+/* Line chart grid */
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.chart-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.chart-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
+.chart-wrap{height:100px}
+.lc{width:100%;height:100%}
+
+/* Anomaly digest */
+.anm-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.anm-row{display:flex;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);font-size:12px}
+.anm-row:last-child{border-bottom:none}
+.anm-sid{color:var(--accent);font-size:10px;margin-bottom:1px;cursor:pointer}.anm-sid:hover{text-decoration:underline}
+.anm-txt{color:var(--text)}
+
+/* Report tab */
+#reportView{display:none;flex-direction:column}
+.r-topbar{display:flex;align-items:center;gap:10px;margin-bottom:18px}
+.back-btn{display:flex;align-items:center;gap:4px;padding:4px 12px;border-radius:6px;background:var(--surf2);border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;transition:all .15s}
+.back-btn:hover{border-color:var(--accent);color:var(--accent)}
+.r-hdr{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap;gap:10px}
+.r-title{font-size:16px;font-weight:600}.r-sub{font-size:12px;color:var(--muted);margin-top:3px}
+.btn-grp{display:flex;gap:8px;flex-wrap:wrap}
+.btn{padding:5px 13px;border-radius:6px;border:1px solid var(--border);background:var(--surf2);color:var(--text);cursor:pointer;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:5px;transition:all .15s}
+.btn:hover{border-color:var(--muted)}.btn.primary{background:rgba(63,185,80,.12);border-color:var(--green);color:var(--green)}.btn.primary:hover{background:rgba(63,185,80,.22)}
+.mstrip{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:18px}
+.mc{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:9px 12px}
+.mc-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:3px}
+.mc-val{font-size:17px;font-weight:600}
+.mc-val.ok{color:var(--green)}.mc-val.bad{color:var(--red)}.mc-val.med{color:var(--yellow)}.mc-val.neu{color:var(--accent)}
+.rpt-body{font-size:13px;line-height:1.75;color:var(--text)}
+.rpt-body h2{font-size:14px;margin:18px 0 7px;padding-bottom:5px;border-bottom:1px solid var(--border)}
+.rpt-body h3{font-size:13px;margin:12px 0 5px}
+.rpt-body p{margin-bottom:9px}.rpt-body ul{padding-left:18px;margin-bottom:9px}.rpt-body li{margin-bottom:3px}
+.rpt-body strong{font-weight:600}
+.rpt-body code{background:var(--surf2);border:1px solid var(--border);padding:1px 5px;border-radius:4px;font-size:12px;font-family:"SFMono-Regular",Consolas,monospace}
+.no-rpt{border:1px dashed var(--border);border-radius:8px;padding:36px;text-align:center;color:var(--muted)}
+.no-rpt small{display:block;font-size:12px;margin-top:7px}
+.spinner{display:inline-block;width:15px;height:15px}
+.spinner::after{content:"";display:block;width:13px;height:13px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+
+<div id="topBand">
+  <div id="header">
+    <img src="/favicon.ico" alt="" onerror="this.style.display='none'">
+    <div class="logo">Drone<span>Pi</span> Ground Station</div>
+    <a class="mesh-btn" id="meshBtn" href="#" target="_blank">&#128506; Mesh Viewer</a>
+    <div id="statusPills"><div class="pill warn"><div class="dot"></div>Loading...</div></div>
+  </div>
+  <div id="kpiStrip">
+    <div class="kc"><span class="v accent" id="ksF">--</span><span class="l">Flights</span></div>
+    <div class="kdiv"></div>
+    <div class="kc"><span class="v green"  id="ksD">--</span><span class="l">Avg Duration</span></div>
+    <div class="kdiv"></div>
+    <div class="kc"><span class="v"        id="ksA">--</span><span class="l">Anomalies</span></div>
+    <div class="kdiv"></div>
+    <div class="kc"><span class="v accent" id="ksR">--</span><span class="l">Reports</span></div>
+    <div class="kdiv"></div>
+    <span id="ksL" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+</div>
+
+<div id="body">
+  <div id="sidebar">
+    <div id="sbhdr">Flights <button class="rib" onclick="loadFlights()" title="Refresh">&#8635;</button></div>
+    <div id="flist"><div style="padding:14px;color:var(--muted);font-size:11px">Loading...</div></div>
+  </div>
+
+  <div id="main">
+    <div id="tabBar">
+      <button class="tab active" id="tabDash"   onclick="switchTab('dash')">&#128202; Dashboard</button>
+      <button class="tab"        id="tabReport" onclick="switchTab('report')">&#128196; Report</button>
+    </div>
+
+    <div id="mainContent">
+
+      <!-- DASHBOARD -->
+      <div id="dashView">
+
+        <!-- Fleet summary -->
+        <div id="fleetCard">
+          <div id="fleetIcon">&#128760;</div>
+          <div id="fleetBody">
+            <div id="fleetTitle">Fleet Summary &middot; AI Analysis</div>
+            <div id="fleetText" style="color:var(--muted);font-size:12px">Generating fleet summary...</div>
+          </div>
+          <button id="fleetRefresh" onclick="loadFleetSummary(true)" title="Refresh">&#8635;</button>
+        </div>
+
+        <!-- KPI cards -->
+        <div>
+          <div class="sec">Key Metrics</div>
+          <div class="kpi-grid">
+            <div class="kpi-card"><div class="kc-lbl">Total Flights</div><div class="kc-val accent" id="kc1">--</div><div class="kc-sub" id="kc1s">cached locally</div></div>
+            <div class="kpi-card"><div class="kc-lbl">Avg Duration</div><div class="kc-val green"   id="kc2">--</div><div class="kc-sub">seconds</div></div>
+            <div class="kpi-card"><div class="kc-lbl">Avg SLAM Points</div><div class="kc-val accent" id="kc3">--</div><div class="kc-sub">per flight</div></div>
+            <div class="kpi-card"><div class="kc-lbl">Total Anomalies</div><div class="kc-val"       id="kc4">--</div><div class="kc-sub" id="kc4s"></div></div>
+          </div>
+        </div>
+
+        <!-- Trend line charts -->
+        <div>
+          <div class="sec">Trends &mdash; last 10 flights</div>
+          <div class="chart-grid">
+            <div class="chart-card"><div class="chart-lbl">Flight Duration (s)</div><div class="chart-wrap"><svg class="lc" id="cDur"  viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">SLAM Points (k)</div><div class="chart-wrap"><svg class="lc" id="cPts"  viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">Drift (m) <span style="color:var(--yellow);font-size:9px">warn&gt;0.15 bad&gt;0.25</span></div><div class="chart-wrap"><svg class="lc" id="cDrft" viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">CPU Temp (&deg;C) <span style="color:var(--yellow);font-size:9px">warn&gt;65 bad&gt;75</span></div><div class="chart-wrap"><svg class="lc" id="cTemp" viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
+          </div>
+        </div>
+
+        <!-- Pipeline bottleneck -->
+        <div>
+          <div class="sec">Post-Processing Pipeline &mdash; Latest Flight</div>
+          <div id="pipelineCard">
+            <div class="pipe-title">Stage Durations <span id="pipeTotal" style="color:var(--muted);font-weight:400;font-size:10px;margin-left:8px"></span></div>
+            <div class="pipe-stages" id="pipeStages">
+              <div style="color:var(--muted);font-size:12px">No pipeline data yet — run a flight or replay with stage timings.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Anomaly digest -->
+        <div>
+          <div class="sec">Recent Anomalies</div>
+          <div class="anm-card" id="anmList">
+            <div class="anm-row"><div style="color:var(--muted);font-size:12px">No anomaly data yet.</div></div>
+          </div>
+        </div>
+
+      </div><!-- /dashView -->
+
+      <!-- REPORT -->
+      <div id="reportView">
+        <div class="r-topbar">
+          <button class="back-btn" onclick="goBack()">&#8592; Back</button>
+          <div style="font-size:12px;color:var(--muted)" id="rBc"></div>
+        </div>
+        <div class="r-hdr">
+          <div><div class="r-title" id="rTitle">--</div><div class="r-sub" id="rSub"></div></div>
+          <div class="btn-grp" id="rBtns"></div>
+        </div>
+        <div class="mstrip" id="mStrip"></div>
+        <div id="rBody"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+var RPI         = '';
+var flights     = [];
+var selId       = null;
+var fleetLoaded = false;
+
+// ── Status ────────────────────────────────────────────────────────────────────
+function loadStatus() {
+  fetch('/api/status')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.rpi_base) {
+        RPI = d.rpi_base;
+        document.getElementById('meshBtn').href = RPI + '/meshview.html';
+      }
+      var defs = [['Daemon', d.daemon, false], ['Ollama', d.ollama, false], ['RPi', d.rpi, true]];
+      document.getElementById('statusPills').innerHTML = defs.map(function(x) {
+        return '<div class="pill ' + (x[1] ? 'ok' : x[2] ? 'warn' : 'err') + '"><div class="dot"></div>' + x[0] + '</div>';
+      }).join('');
+    })
+    .catch(function() {});
+}
+
+// ── Flights ───────────────────────────────────────────────────────────────────
+function loadFlights() {
+  fetch('/api/flights')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      flights = d.flights || [];
+      renderSidebar();
+      updateStrip(flights);
+      updateDash(flights);
+    })
+    .catch(function() {
+      document.getElementById('flist').innerHTML =
+        '<div style="padding:14px;color:var(--muted);font-size:11px">Failed to load.</div>';
+    });
+}
+
+function updateStrip(fs) {
+  var total = fs.length, rpts = 0, durSum = 0, durN = 0, anms = 0;
+  for (var i = 0; i < fs.length; i++) {
+    if (fs[i].has_report) rpts++;
+    var dr = fs[i].duration_raw || 0;
+    if (dr) { durSum += dr; durN++; }
+    anms += fs[i].anomaly_count || 0;
+  }
+  var avgDur = durN ? Math.round(durSum / durN) : 0;
+  document.getElementById('ksF').textContent = total || '0';
+  document.getElementById('ksD').textContent = avgDur ? avgDur + 's' : '--';
+  var ae = document.getElementById('ksA');
+  ae.textContent = anms || '0';
+  ae.className = 'v ' + (anms > 5 ? 'red' : anms > 0 ? 'yellow' : 'green');
+  document.getElementById('ksR').textContent = rpts + '/' + total;
+  document.getElementById('ksL').textContent = fs[0] ? 'Last: ' + (fs[0].start_time || fs[0].id || '').slice(0, 16) : '';
+}
+
+function updateDash(fs) {
+  var total = fs.length, rpts = 0, durSum = 0, durN = 0, ptsSum = 0, ptsN = 0, anms = 0;
+  for (var i = 0; i < fs.length; i++) {
+    if (fs[i].has_report) rpts++;
+    var dr = fs[i].duration_raw || 0; if (dr) { durSum += dr; durN++; }
+    var p  = fs[i].slam_points  || 0; if (p)  { ptsSum += p;  ptsN++; }
+    anms += fs[i].anomaly_count || 0;
+  }
+  var avgDur = durN ? Math.round(durSum / durN) : 0;
+  var avgPts = ptsN ? Math.round(ptsSum / ptsN) : 0;
+
+  document.getElementById('kc1').textContent  = total || '--';
+  document.getElementById('kc1s').textContent = rpts + ' with reports';
+  document.getElementById('kc2').textContent  = avgDur ? avgDur + 's' : '--';
+  document.getElementById('kc3').textContent  = fmtN(avgPts) || '--';
+  var a4 = document.getElementById('kc4');
+  a4.textContent = anms || '0';
+  a4.className = 'kc-val ' + (anms > 5 ? 'red' : anms > 0 ? 'yellow' : 'green');
+  document.getElementById('kc4s').textContent = 'across all sessions';
+
+  // Line charts — last 10, oldest first
+  var recent = fs.slice().reverse().slice(-10);
+  drawLine('cDur',  recent, 'duration_raw',   1,    null, null);
+  drawLine('cPts',  recent, 'slam_points',    1000, null, null);
+  drawLine('cDrft', recent, 'drift_estimate', 1,    function(v){return v>0.25;}, function(v){return v>0.15;});
+  drawLine('cTemp', recent, 'cpu_temp_max',   1,    function(v){return v>75;},   function(v){return v>65;});
+
+  // Pipeline bottleneck — use most recent flight with pipeline data
+  var pipeFlights = fs.filter(function(f) { return f.stage_timings; });
+  if (pipeFlights.length > 0) {
+    renderPipeline(pipeFlights[0]);
+  }
+
+  // Anomaly digest
+  var all = [];
+  for (var i = 0; i < fs.length; i++) {
+    var anmArr = fs[i].anomalies || [];
+    for (var j = 0; j < anmArr.length; j++) all.push({ sid: fs[i].id, t: anmArr[j] });
+  }
+  if (all.length) {
+    var rows = '';
+    for (var i = 0; i < Math.min(all.length, 8); i++) {
+      rows += '<div class="anm-row"><div>&#9888;</div><div>'
+        + '<div class="anm-sid" onclick="selectFlight(\'' + esc(all[i].sid) + '\')">' + esc(all[i].sid) + '</div>'
+        + '<div class="anm-txt">' + esc(all[i].t) + '</div>'
+        + '</div></div>';
+    }
+    document.getElementById('anmList').innerHTML = rows;
+  } else {
+    document.getElementById('anmList').innerHTML =
+      '<div class="anm-row"><div style="color:var(--muted);font-size:12px">No anomalies recorded yet.</div></div>';
+  }
+}
+
+// ── Pipeline bottleneck renderer ──────────────────────────────────────────────
+function renderPipeline(f) {
+  var st = f.stage_timings || {};
+  var order = ['BagReader','MLSSmoother','GroundClassifier','DTMBuilder','DSMBuilder','MeshMerger','TextureProjection','Publisher'];
+  var total = 0;
+  for (var k in st) total += st[k] || 0;
+
+  var maxT = 0;
+  for (var i = 0; i < order.length; i++) { var t = st[order[i]] || 0; if (t > maxT) maxT = t; }
+
+  var bottleneck = f.bottleneck_stage || '';
+  if (!bottleneck && maxT > 0) {
+    for (var i = 0; i < order.length; i++) {
+      if ((st[order[i]] || 0) === maxT) { bottleneck = order[i]; break; }
+    }
+  }
+
+  document.getElementById('pipeTotal').textContent =
+    'Total: ' + total.toFixed(1) + 's' + (bottleneck ? '  |  Bottleneck: ' + bottleneck : '');
+
+  var html = '';
+  for (var i = 0; i < order.length; i++) {
+    var name = order[i];
+    var t    = st[name] || 0;
+    var pct  = maxT > 0 ? (t / maxT * 100).toFixed(0) : 0;
+    var isBot = name === bottleneck;
+    var barCls = isBot ? 'pipe-bar hot' : (t > maxT * 0.6 ? 'pipe-bar warm' : 'pipe-bar');
+    html += '<div class="pipe-row">'
+      + '<div class="pipe-name">' + name + '</div>'
+      + '<div class="pipe-bar-wrap"><div class="' + barCls + '" style="width:' + pct + '%"></div></div>'
+      + '<div class="pipe-time">' + t.toFixed(1) + 's</div>'
+      + (isBot ? '<span class="pipe-badge bottleneck">bottleneck</span>' : '<span class="pipe-badge"></span>')
+      + '</div>';
+  }
+  document.getElementById('pipeStages').innerHTML = html;
+}
+
+// ── Fleet summary ─────────────────────────────────────────────────────────────
+function loadFleetSummary(force) {
+  if (fleetLoaded && !force) return;
+  document.getElementById('fleetText').textContent = 'Generating fleet summary...';
+  // Pass total flight count from cache so Ollama has correct numbers
+  var total = flights.length;
+  fetch('/api/fleet-summary?total=' + total)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      document.getElementById('fleetText').textContent = d.summary || 'No summary available.';
+      fleetLoaded = true;
+    })
+    .catch(function() {
+      document.getElementById('fleetText').textContent = 'Fleet summary unavailable — check Ollama.';
+    });
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function renderSidebar() {
+  var el = document.getElementById('flist');
+  if (!flights.length) {
+    el.innerHTML = '<div style="padding:14px;color:var(--muted);font-size:11px">No flights cached yet.</div>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < flights.length; i++) {
+    var f = flights[i];
+    html += '<div class="fi ' + (f.id === selId ? 'active' : '') + '" onclick="selectFlight(\'' + esc(f.id) + '\')">'
+      + '<div class="fi-id">' + esc(f.id) + (f.has_report ? '<span class="badge rpt">report</span>' : '') + '</div>'
+      + '<div class="fi-meta">' + (f.duration || '--') + ' &middot; ' + (f.start_time || '').slice(0, 10) + '</div>'
+      + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.getElementById('tabDash').classList.toggle('active', tab === 'dash');
+  document.getElementById('tabReport').classList.toggle('active', tab === 'report');
+  document.getElementById('dashView').style.display   = tab === 'dash'   ? 'flex' : 'none';
+  document.getElementById('reportView').style.display = tab === 'report' ? 'flex' : 'none';
+  if (tab === 'dash') loadFleetSummary(false);
+}
+document.getElementById('dashView').style.display   = 'flex';
+document.getElementById('reportView').style.display = 'none';
+
+// ── Flight detail ─────────────────────────────────────────────────────────────
+function selectFlight(id) {
+  selId = id;
+  renderSidebar();
+  switchTab('report');
+  document.getElementById('meshBtn').href        = RPI + '/meshview.html?session=' + id;
+  document.getElementById('rBc').textContent     = id;
+  document.getElementById('rTitle').textContent  = id;
+  document.getElementById('rSub').textContent    = 'Loading...';
+  document.getElementById('rBtns').innerHTML     = '';
+  document.getElementById('mStrip').innerHTML    = '';
+  document.getElementById('rBody').innerHTML     =
+    '<div style="display:flex;gap:10px;align-items:center;color:var(--muted);padding:16px 0">'
+    + '<div class="spinner"></div>Loading report...</div>';
+
+  fetch('/api/report/' + id)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var meshUrl = RPI + '/meshview.html?session=' + id;
+      var dur = d.duration ? d.duration + 's' : null;
+      var parts = [];
+      if (dur) parts.push('Duration: ' + dur);
+      if (d.start_time) parts.push(d.start_time);
+      document.getElementById('rSub').textContent = parts.join('  \u00b7  ');
+      document.getElementById('rBtns').innerHTML =
+        '<a class="btn primary" href="' + meshUrl + '" target="_blank">&#128506; Open Mesh Viewer</a>'
+        + (d.report ? '<button class="btn" onclick="copyRpt()">&#128203; Copy</button>' : '');
+      var m = d.metrics || {};
+      document.getElementById('mStrip').innerHTML =
+        mkMc('Duration',    dur || '--',                                    'neu')
+        + mkMc('SLAM Points', fmtN(m.slam_points) || '--',                 m.slam_points > 500000 ? 'ok' : 'med')
+        + mkMc('Drift',       m.drift != null ? m.drift + 'm' : '--',      m.drift != null ? (m.drift <= 0.25 ? 'ok' : 'bad') : 'neu')
+        + mkMc('CPU Temp',    m.cpu_temp ? m.cpu_temp + '\u00b0C' : '--',  m.cpu_temp > 75 ? 'bad' : m.cpu_temp > 65 ? 'med' : 'ok')
+        + mkMc('Anomalies',   m.anomaly_count != null ? String(m.anomaly_count) : '--', m.anomaly_count > 0 ? 'bad' : 'ok');
+      document.getElementById('rBody').innerHTML = d.report
+        ? '<div class="rpt-body">' + mdHtml(d.report) + '</div>'
+        : '<div class="no-rpt">No report yet<small>Run: <code>ground-station replay ' + esc(id) + '</code></small></div>';
+    })
+    .catch(function(e) {
+      document.getElementById('rBody').innerHTML =
+        '<div style="color:var(--red);padding:16px 0">Failed: ' + String(e) + '</div>';
+    });
+}
+
+function goBack() {
+  selId = null;
+  renderSidebar();
+  document.getElementById('meshBtn').href = RPI + '/meshview.html';
+  switchTab('dash');
+}
+
+// ── Line chart ────────────────────────────────────────────────────────────────
+function drawLine(id, flights, key, scale, isBad, isWarn) {
+  var svg = document.getElementById(id);
+  var values = [];
+  for (var i = 0; i < flights.length; i++) {
+    var raw = flights[i][key];
+    values.push(raw != null ? raw / scale : 0);
+  }
+  var n = values.length;
+  if (!n) { svg.innerHTML = '<text x="150" y="48" text-anchor="middle" fill="#8b949e" font-size="11">No data</text>'; return; }
+
+  var W = 300, H = 80, PAD = 8;
+  var mn = values[0], mx = values[0];
+  for (var i = 1; i < n; i++) { if (values[i] < mn) mn = values[i]; if (values[i] > mx) mx = values[i]; }
+  var range = mx - mn || 0.001;
+
+  function px(i) { return n > 1 ? (i / (n - 1)) * W : W / 2; }
+  function py(v) { return H - PAD - ((v - mn) / range) * (H - PAD * 2); }
+
+  // Area fill path
+  var areaD = 'M ' + px(0).toFixed(1) + ',' + H;
+  for (var i = 0; i < n; i++) areaD += ' L ' + px(i).toFixed(1) + ',' + py(values[i]).toFixed(1);
+  areaD += ' L ' + px(n-1).toFixed(1) + ',' + H + ' Z';
+
+  // Line path
+  var lineD = 'M ' + px(0).toFixed(1) + ',' + py(values[0]).toFixed(1);
+  for (var i = 1; i < n; i++) lineD += ' L ' + px(i).toFixed(1) + ',' + py(values[i]).toFixed(1);
+
+  var out = '<line x1="0" y1="' + H + '" x2="' + W + '" y2="' + H + '" stroke="#30363d" stroke-width="1"/>';
+  out += '<path d="' + areaD + '" fill="rgba(88,166,255,0.07)" stroke="none"/>';
+  out += '<path d="' + lineD + '" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>';
+
+  // Dots and labels
+  for (var i = 0; i < n; i++) {
+    var v   = values[i];
+    var cx  = px(i).toFixed(1);
+    var cy  = py(v).toFixed(1);
+    var bad  = isBad  && isBad(v);
+    var warn = isWarn && isWarn(v);
+    var col  = bad ? '#f85149' : warn ? '#d29922' : '#58a6ff';
+    out += '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="' + col + '"/>';
+    if (n <= 10) {
+      var lbl = v >= 1000 ? Math.round(v/1000) + 'k' : (v % 1 !== 0 ? v.toFixed(2) : String(Math.round(v)));
+      out += '<text x="' + cx + '" y="' + (H + 9) + '" text-anchor="middle" fill="' + col + '" font-size="8">' + lbl + '</text>';
+    }
+  }
+  svg.innerHTML = out;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function mkMc(lbl, val, cls) {
+  return '<div class="mc"><div class="mc-lbl">' + lbl + '</div><div class="mc-val ' + cls + '">' + val + '</div></div>';
+}
+function fmtN(n) {
+  if (!n) return '';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(0) + 'k';
+  return String(n);
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function mdHtml(raw) {
+  var s = raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  var lines = s.split('\n'), out = '', inUl = false, inP = false;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i], t = line.trim();
+    if (t.slice(0,3) === '## ')      { if(inUl){out+='</ul>';inUl=false;} if(inP){out+='</p>';inP=false;} out += '<h2>'+inlineFmt(t.slice(3))+'</h2>'; }
+    else if (t.slice(0,4) === '### '){ if(inUl){out+='</ul>';inUl=false;} if(inP){out+='</p>';inP=false;} out += '<h3>'+inlineFmt(t.slice(4))+'</h3>'; }
+    else if (t.slice(0,2) === '- ')  { if(inP){out+='</p>';inP=false;} if(!inUl){out+='<ul>';inUl=true;} out += '<li>'+inlineFmt(t.slice(2))+'</li>'; }
+    else if (t === '')               { if(inUl){out+='</ul>';inUl=false;} if(inP){out+='</p>';inP=false;} }
+    else                             { if(inUl){out+='</ul>';inUl=false;} if(!inP){out+='<p>';inP=true;} else out+=' '; out+=inlineFmt(t); }
+  }
+  if (inUl) out += '</ul>';
+  if (inP)  out += '</p>';
+  return out;
+}
+function inlineFmt(s) {
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  var tick = String.fromCharCode(96);
+  s = s.replace(new RegExp(tick+'([^'+tick+']+)'+tick,'g'), '<code>$1</code>');
+  return s;
+}
+function copyRpt() { var b=document.getElementById('rBody'); if(b) navigator.clipboard.writeText(b.innerText); }
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadStatus();
+loadFlights();
+setTimeout(function() { loadFleetSummary(false); }, 600);
+setInterval(loadStatus,  10000);
+setInterval(loadFlights, 30000);
+</script>
+</body>
+</html>

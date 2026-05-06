@@ -120,13 +120,12 @@ class ProcessManager:
             log_fh = open(log_path, "a")  # noqa: SIM115 — kept open for child
 
             if platform.system() == "Windows":
-                DETACHED_PROCESS = 0x00000008
-                CREATE_NEW_PROCESS_GROUP = subprocess.CREATE_NEW_PROCESS_GROUP
+                CREATE_NO_WINDOW = 0x08000000
                 proc = subprocess.Popen(
                     cmd,
                     stdout=log_fh,
                     stderr=log_fh,
-                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    creationflags=CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
                     close_fds=True,
                 )
             else:

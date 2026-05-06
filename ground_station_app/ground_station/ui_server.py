@@ -1,36 +1,29 @@
 """
 ground_station/ui_server.py — Local dashboard HTTP server.
 
-Serves the single-page dashboard HTML and a JSON API that the page
-polls to get flight list and report content from the local cache.
+Serves dashboard.html (a standalone file in the same directory) and a
+JSON API the page polls for flight data.
 
 Endpoints
 ---------
-GET  /                          → dashboard HTML (embedded in this module)
-GET  /api/status                → daemon + Ollama + RPi health JSON
-GET  /api/flights               → list of locally cached flights
-GET  /api/report/<session_id>   → markdown report text for a flight
-GET  /favicon.ico               → DronePi logo ICO from state dir
+GET /                     dashboard.html (read from disk — no embedding)
+GET /favicon.ico
+GET /api/status           {daemon, ollama, rpi, rpi_base, model}
+GET /api/flights          [{id, has_report, duration, slam_points, ...}]
+GET /api/fleet-summary    {summary}  Ollama 2-3 sentence narrative
+GET /api/report/<id>      {report, duration, metrics}
 
-All responses include CORS headers so the page can call the RPi
-meshview directly from the browser without proxy issues.
-
-Design constraints
-------------------
-- No main() in this module.
-- Pure stdlib HTTP server — no Flask/FastAPI dependency.
-- Dashboard HTML is embedded as a string constant (no separate file to
-  manage or distribute).
-- All failures return JSON error responses, never crash the server.
+Data sources (priority)
+-----------------------
+1. SQLite at ~/.dronepi-ground/dronepi.db
+2. CSV/JSON files in ~/.dronepi-ground/cache/  (fallback)
 """
 
 import json
 import logging
 import os
-import platform
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 log = logging.getLogger(__name__)
@@ -50,356 +43,42 @@ def _rpi_base() -> str:
     port = os.environ.get("DRONEPI_RPI_PORT", "8080")
     return f"http://{host}:{port}"
 
+def _get_db():
+    try:
+        from ground_station.db import FlightDatabase
+        return FlightDatabase()
+    except Exception as exc:
+        log.warning(f"[UI] DB unavailable, CSV fallback: {exc}")
+        return None
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Dashboard HTML (single-file, self-contained)
-# ══════════════════════════════════════════════════════════════════════════════
-
-DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DronePi Ground Station</title>
-<style>
-  :root {
-    --bg:       #0d1117;
-    --surface:  #161b22;
-    --border:   #30363d;
-    --green:    #3fb950;
-    --green-dim:#2ea043;
-    --text:     #e6edf3;
-    --muted:    #8b949e;
-    --red:      #f85149;
-    --yellow:   #d29922;
-    --accent:   #58a6ff;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 14px; display: flex; flex-direction: column; height: 100vh;
-  }
-
-  /* ── Header ── */
-  header {
-    background: var(--surface); border-bottom: 1px solid var(--border);
-    padding: 12px 20px; display: flex; align-items: center; gap: 14px;
-    flex-shrink: 0;
-  }
-  header img { width: 36px; height: 36px; border-radius: 50%; }
-  header h1 { font-size: 16px; font-weight: 600; color: var(--text); }
-  header h1 span { color: var(--green); }
-  .status-bar { margin-left: auto; display: flex; gap: 16px; }
-  .pill {
-    font-size: 11px; padding: 3px 10px; border-radius: 12px;
-    border: 1px solid var(--border); display: flex; align-items: center; gap: 5px;
-  }
-  .pill.ok  { border-color: var(--green);  color: var(--green); }
-  .pill.err { border-color: var(--red);    color: var(--red); }
-  .pill.warn{ border-color: var(--yellow); color: var(--yellow); }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-
-  /* ── Layout ── */
-  .layout { display: flex; flex: 1; overflow: hidden; }
-
-  /* ── Sidebar ── */
-  .sidebar {
-    width: 260px; min-width: 200px; background: var(--surface);
-    border-right: 1px solid var(--border);
-    display: flex; flex-direction: column; flex-shrink: 0;
-  }
-  .sidebar-header {
-    padding: 12px 16px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--border);
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .refresh-btn {
-    background: none; border: none; color: var(--muted); cursor: pointer;
-    font-size: 14px; padding: 2px 6px; border-radius: 4px;
-  }
-  .refresh-btn:hover { background: var(--border); color: var(--text); }
-  .flight-list { overflow-y: auto; flex: 1; }
-  .flight-item {
-    padding: 10px 16px; cursor: pointer; border-bottom: 1px solid var(--border);
-    transition: background .15s;
-  }
-  .flight-item:hover    { background: rgba(255,255,255,.04); }
-  .flight-item.active   { background: rgba(63,185,80,.08); border-left: 3px solid var(--green); }
-  .flight-item .fid     { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 3px; }
-  .flight-item .fmeta   { font-size: 11px; color: var(--muted); }
-  .flight-item .badge   {
-    display: inline-block; font-size: 10px; padding: 1px 6px;
-    border-radius: 4px; margin-left: 6px; vertical-align: middle;
-  }
-  .badge.complete { background: rgba(63,185,80,.15); color: var(--green); }
-  .badge.report   { background: rgba(88,166,255,.15); color: var(--accent); }
-
-  /* ── Main content ── */
-  .main { flex: 1; overflow-y: auto; padding: 24px 32px; }
-  .empty-state {
-    display: flex; flex-direction: column; align-items: center;
-    justify-content: center; height: 60%; color: var(--muted); gap: 12px;
-  }
-  .empty-state .icon { font-size: 48px; }
-
-  /* ── Report view ── */
-  .report-header {
-    display: flex; justify-content: space-between; align-items: flex-start;
-    margin-bottom: 20px; flex-wrap: wrap; gap: 12px;
-  }
-  .report-title { font-size: 18px; font-weight: 600; color: var(--text); }
-  .report-subtitle { font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .btn {
-    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); cursor: pointer;
-    font-size: 12px; font-weight: 500; text-decoration: none;
-    display: inline-flex; align-items: center; gap: 6px; transition: all .15s;
-  }
-  .btn:hover      { border-color: var(--green); color: var(--green); }
-  .btn.primary    { background: var(--green-dim); border-color: var(--green); color: #fff; }
-  .btn.primary:hover { background: var(--green); }
-  .btn-group      { display: flex; gap: 8px; flex-wrap: wrap; }
-
-  /* ── Markdown rendering ── */
-  .report-body {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 24px; line-height: 1.7;
-  }
-  .report-body h2 {
-    font-size: 15px; font-weight: 600; color: var(--text);
-    border-bottom: 1px solid var(--border); padding-bottom: 8px;
-    margin: 20px 0 12px;
-  }
-  .report-body h2:first-child { margin-top: 0; }
-  .report-body p  { color: var(--muted); margin-bottom: 10px; }
-  .report-body ul { padding-left: 20px; color: var(--muted); }
-  .report-body li { margin-bottom: 4px; }
-  .report-body strong { color: var(--text); }
-  .report-body code {
-    background: var(--bg); padding: 1px 6px; border-radius: 4px;
-    font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px;
-    color: var(--accent);
-  }
-
-  /* ── No report placeholder ── */
-  .no-report {
-    background: var(--surface); border: 1px dashed var(--border);
-    border-radius: 8px; padding: 40px; text-align: center; color: var(--muted);
-  }
-  .no-report .hint { font-size: 12px; margin-top: 8px; }
-
-  /* ── Loading spinner ── */
-  .spinner { display: inline-block; width: 16px; height: 16px; }
-  .spinner::after {
-    content: ''; display: block; width: 14px; height: 14px;
-    border: 2px solid var(--border); border-top-color: var(--green);
-    border-radius: 50%; animation: spin .7s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-</style>
-</head>
-<body>
-
-<header>
-  <img src="/favicon.ico" alt="DronePi" onerror="this.style.display='none'">
-  <h1>Drone<span>Pi</span> Ground Station</h1>
-  <div class="status-bar" id="statusBar">
-    <div class="pill warn"><div class="dot"></div>Loading...</div>
-  </div>
-</header>
-
-<div class="layout">
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      Flights
-      <button class="refresh-btn" onclick="loadFlights()" title="Refresh">↻</button>
-    </div>
-    <div class="flight-list" id="flightList">
-      <div style="padding:16px;color:var(--muted);font-size:12px;">Loading...</div>
-    </div>
-  </aside>
-
-  <main class="main" id="mainContent">
-    <div class="empty-state">
-      <div class="icon">🛸</div>
-      <div>Select a flight to view its report</div>
-      <div style="font-size:12px;">Reports are generated automatically after each flight lands.</div>
-    </div>
-  </main>
-</div>
-
-<script>
-const RPI_BASE = "DRONEPI_RPI_BASE";
-let selectedId  = null;
-let statusTimer = null;
-
-// ── Status bar ──────────────────────────────────────────────────────────────
-async function loadStatus() {
-  try {
-    const r   = await fetch('/api/status');
-    const d   = await r.json();
-    const bar = document.getElementById('statusBar');
-    bar.innerHTML = '';
-    const items = [
-      { label: 'Daemon',  ok: d.daemon  },
-      { label: 'Ollama',  ok: d.ollama  },
-      { label: 'RPi',     ok: d.rpi,   warn: true },
-    ];
-    items.forEach(({label, ok, warn}) => {
-      const cls = ok ? 'ok' : (warn ? 'warn' : 'err');
-      bar.innerHTML += `<div class="pill ${cls}">
-        <div class="dot"></div>${label}
-      </div>`;
-    });
-  } catch(e) {
-    document.getElementById('statusBar').innerHTML =
-      '<div class="pill err"><div class="dot"></div>UI Error</div>';
-  }
-}
-
-// ── Flight list ─────────────────────────────────────────────────────────────
-async function loadFlights() {
-  try {
-    const r   = await fetch('/api/flights');
-    const d   = await r.json();
-    const el  = document.getElementById('flightList');
-    if (!d.flights || d.flights.length === 0) {
-      el.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px;">No flights in cache yet.</div>';
-      return;
-    }
-    el.innerHTML = d.flights.map(f => `
-      <div class="flight-item ${f.id === selectedId ? 'active' : ''}"
-           onclick="selectFlight('${f.id}')">
-        <div class="fid">${f.id}
-          ${f.has_report ? '<span class="badge report">report</span>' : ''}
-        </div>
-        <div class="fmeta">${f.duration || '—'} &nbsp;·&nbsp; ${f.start_time || '—'}</div>
-      </div>`).join('');
-  } catch(e) {
-    document.getElementById('flightList').innerHTML =
-      '<div style="padding:16px;color:var(--muted);font-size:12px;">Failed to load flights.</div>';
-  }
-}
-
-// ── Flight detail ────────────────────────────────────────────────────────────
-async function selectFlight(id) {
-  selectedId = id;
-  loadFlights();  // re-render to show active state
-
-  const main = document.getElementById('mainContent');
-  main.innerHTML = '<div style="padding:40px;display:flex;gap:12px;align-items:center;color:var(--muted)"><div class="spinner"></div>Loading report...</div>';
-
-  try {
-    const r = await fetch(`/api/report/${id}`);
-    const d = await r.json();
-
-    const meshUrl = `${RPI_BASE}/meshview.html?session=${id}`;
-
-    if (d.report) {
-      main.innerHTML = `
-        <div class="report-header">
-          <div>
-            <div class="report-title">${id}</div>
-            <div class="report-subtitle">
-              ${d.duration ? 'Duration: ' + d.duration + 's' : ''}
-              ${d.start_time ? ' &nbsp;·&nbsp; ' + d.start_time : ''}
-            </div>
-          </div>
-          <div class="btn-group">
-            <a class="btn primary" href="${meshUrl}" target="_blank">🗺 Open Mesh Viewer</a>
-            <button class="btn" onclick="copyReport()">📋 Copy Report</button>
-          </div>
-        </div>
-        <div class="report-body" id="reportBody">${renderMarkdown(d.report)}</div>`;
-    } else {
-      main.innerHTML = `
-        <div class="report-header">
-          <div>
-            <div class="report-title">${id}</div>
-            <div class="report-subtitle">No report generated yet</div>
-          </div>
-          <div class="btn-group">
-            <a class="btn primary" href="${meshUrl}" target="_blank">🗺 Open Mesh Viewer</a>
-          </div>
-        </div>
-        <div class="no-report">
-          <div>Report not yet available</div>
-          <div class="hint">The daemon will generate it automatically, or run:<br>
-            <code>ground-station replay ${id}</code>
-          </div>
-        </div>`;
-    }
-  } catch(e) {
-    main.innerHTML = `<div style="padding:40px;color:var(--red)">Failed to load report: ${e}</div>`;
-  }
-}
-
-// ── Simple markdown → HTML ───────────────────────────────────────────────────
-function renderMarkdown(md) {
-  return md
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^### (.+)$/gm, '<h3 style="font-size:13px;color:var(--text);margin:14px 0 8px;">$1</h3>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/g, s => `<ul>${s}</ul>`)
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/^(?!<[hul])/gm, '')
-    .replace(/(<p><\/p>)+/g, '')
-    .trim();
-}
-
-function copyReport() {
-  const body = document.getElementById('reportBody');
-  if (body) navigator.clipboard.writeText(body.innerText);
-}
-
-// ── Init ────────────────────────────────────────────────────────────────────
-loadStatus();
-loadFlights();
-setInterval(loadStatus,  10000);
-setInterval(loadFlights, 20000);
-</script>
-</body>
-</html>
-"""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Request handler
-# ══════════════════════════════════════════════════════════════════════════════
 
 class _DashboardHandler(BaseHTTPRequestHandler):
 
-    def do_GET(self) -> None:
+    def do_GET(self):
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip("/") or "/"
-
+        qs     = parse_qs(parsed.query)
         try:
-            if path == "/":
-                self._serve_dashboard()
-            elif path == "/favicon.ico":
-                self._serve_favicon()
-            elif path == "/api/status":
-                self._serve_status()
-            elif path == "/api/flights":
-                self._serve_flights()
-            elif path.startswith("/api/report/"):
-                session_id = path[len("/api/report/"):]
-                self._serve_report(session_id)
-            else:
-                self._json({"error": "not found"}, 404)
+            if path == "/":                       self._serve_dashboard()
+            elif path == "/favicon.ico":          self._serve_favicon()
+            elif path == "/api/status":           self._serve_status()
+            elif path == "/api/flights":          self._serve_flights()
+            elif path == "/api/fleet-summary":    self._serve_fleet_summary(qs)
+            elif path.startswith("/api/report/"): self._serve_report(path[len("/api/report/"):])
+            else:                                 self._json({"error": "not found"}, 404)
         except Exception as exc:
-            log.error(f"[UI] Handler error: {exc}")
+            log.error(f"[UI] {exc}")
             self._json({"error": str(exc)}, 500)
 
-    # ── Route handlers ────────────────────────────────────────────────────────
+    # ── Routes ────────────────────────────────────────────────────────────────
 
-    def _serve_dashboard(self) -> None:
-        html = DASHBOARD_HTML.replace("DRONEPI_RPI_BASE", _rpi_base())
-        body = html.encode("utf-8")
+    def _serve_dashboard(self):
+        # dashboard.html lives next to this file — same directory
+        html_path = Path(__file__).parent / "dashboard.html"
+        if not html_path.exists():
+            self._json({"error": "dashboard.html not found — deploy it next to ui_server.py"}, 404)
+            return
+        body = html_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -407,12 +86,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_favicon(self) -> None:
+    def _serve_favicon(self):
         ico = _state_dir() / "dronepi.ico"
         if not ico.exists():
-            self.send_response(404)
-            self.end_headers()
-            return
+            self.send_response(404); self.end_headers(); return
         data = ico.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "image/x-icon")
@@ -420,88 +97,290 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_status(self) -> None:
+    def _serve_status(self):
         from ground_station.process_manager import ProcessManager
         from ground_station.ollama_client import OllamaClient
         import httpx
-
-        pm     = ProcessManager()
-        ollama = OllamaClient()
-
-        rpi_ok = False
+        pm = ProcessManager(); ollama = OllamaClient(); rpi_ok = False
         try:
-            with httpx.Client(timeout=httpx.Timeout(3.0)) as c:
-                r = c.get(f"{_rpi_base()}/api/flights")
-                rpi_ok = r.status_code == 200
+            with httpx.Client(timeout=httpx.Timeout(2.0)) as c:
+                rpi_ok = c.get(f"{_rpi_base()}/api/flights").status_code == 200
         except Exception:
             pass
-
         self._json({
-            "daemon": pm.is_running(),
-            "ollama": ollama.is_reachable(),
-            "rpi":    rpi_ok,
-            "model":  ollama.model,
+            "daemon":   pm.is_running(),
+            "ollama":   ollama.is_reachable(),
+            "rpi":      rpi_ok,
+            "model":    ollama.model,
+            "rpi_base": _rpi_base(),
         })
 
-    def _serve_flights(self) -> None:
+    def _serve_flights(self):
+        db = _get_db()
+        if db:
+            rows = db.get_all_flights()
+            if rows:
+                known   = {r["session_id"] for r in rows}
+                db_list = [self._db_to_api(r) for r in rows]
+                extras  = [f for f in self._from_cache() if f["id"] not in known]
+                result  = db_list + extras
+                self._json({"flights": result, "total": len(result), "source": "db"})
+                return
+        flights = self._from_cache()
+        self._json({"flights": flights, "total": len(flights), "source": "cache"})
+
+    def _serve_fleet_summary(self, qs=None):
+        try:
+            from ground_station.ollama_client import OllamaClient, OllamaError
+        except ImportError:
+            self._json({"summary": "Ollama module not available."}); return
+
+        db        = _get_db()
+        stats     = db.get_stats() if db else {}
+        anomalies = db.get_recent_anomalies(5) if db else []
+
+        db_total  = int(stats.get("total", 0) or 0)
+        # JS passes ?total= with the cache count — use whichever is larger
+        js_total  = int((qs or {}).get("total", [0])[0] or 0)
+        total     = max(db_total, js_total)
+        reported  = int(stats.get("reported", 0) or 0)
+        anm_total = int(stats.get("total_anomalies", 0) or 0)
+        avg_dur   = round(float(stats.get("avg_duration_s") or 0), 1)
+        avg_drift = round(float(stats.get("avg_drift_m") or 0), 3)
+
+        if total == 0:
+            self._json({"summary": "No flights recorded yet. System standing by."}); return
+
+        anm_ctx = ""
+        if anomalies:
+            anm_ctx = "\nRecent anomalies:\n" + "\n".join(
+                f"- [{a['session']}] {a['text']}" for a in anomalies[:5])
+
+        prompt = (
+            f"Fleet statistics: {total} total flights, {reported} with full reports. "
+            f"Average flight duration: {avg_dur}s. Average SLAM drift: {avg_drift}m. "
+            f"Total anomalies: {anm_total}.{anm_ctx}\n\n"
+            "In 2-3 sentences, summarise overall fleet health and highlight any patterns. "
+            "If no anomalies, confirm the fleet is operating normally."
+        )
+        system = (
+            "You are a concise flight operations analyst for an autonomous LiDAR mapping drone. "
+            "Respond in 2-3 sentences only. Be direct and specific."
+        )
+        try:
+            summary = OllamaClient().chat(system_prompt=system, user_prompt=prompt)
+            self._json({"summary": summary or "Fleet operating normally."})
+        except OllamaError:
+            if anm_total == 0:
+                msg = f"All systems nominal \u2014 {total} flight{'s' if total!=1 else ''} logged, no anomalies detected."
+            else:
+                msg = (f"{total} flights logged. {anm_total} anomal{'ies' if anm_total!=1 else 'y'} "
+                       f"detected across {reported} analysed sessions.")
+            self._json({"summary": msg})
+        except Exception as exc:
+            log.error(f"[UI] fleet-summary: {exc}")
+            self._json({"summary": "Fleet summary temporarily unavailable."})
+
+    def _serve_report(self, session_id):
+        db = _get_db()
+        if db:
+            row = db.get_flight(session_id)
+            if row:
+                dur = row.get("duration_s")
+                self._json({
+                    "session_id": session_id,
+                    "report":     row.get("report_md"),
+                    "duration":   f"{dur:.0f}" if dur else None,
+                    "start_time": (row.get("arm_time_iso") or "")[:19],
+                    "metrics": {
+                        "slam_points":   row.get("slam_points"),
+                        "drift":         row.get("drift_estimate_m"),
+                        "cpu_temp":      row.get("cpu_temp_max_c"),
+                        "anomaly_count": row.get("anomaly_count", 0),
+                    },
+                })
+                return
+        self._json(self._report_from_cache(session_id))
+
+    # ── DB → API shape ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _db_to_api(row):
+        dur = row.get("duration_s")
+        return {
+            "id":             row["session_id"],
+            "has_report":     row.get("has_report", False),
+            "duration":       f"{dur:.0f}s" if dur else None,
+            "duration_raw":   round(dur, 1) if dur else 0,
+            "start_time":     (row.get("arm_time_iso") or "")[:19],
+            "slam_points":    row.get("slam_points") or 0,
+            "drift_estimate": row.get("drift_estimate_m"),
+            "cpu_temp_max":   row.get("cpu_temp_max_c"),
+            "anomaly_count":  row.get("anomaly_count", 0),
+            "anomalies":      row.get("anomalies", []),
+        }
+
+    # ── CSV cache fallback ────────────────────────────────────────────────────
+
+    def _from_cache(self):
         cache = _cache_dir()
         flights = []
-        if cache.exists():
-            for session_dir in sorted(cache.iterdir(), reverse=True):
-                if not session_dir.is_dir():
-                    continue
-                fid = session_dir.name
-                has_report = (session_dir / "report.md").exists()
+        if not cache.exists():
+            return flights
+        for sd in sorted(cache.iterdir(), reverse=True):
+            if not sd.is_dir():
+                continue
+            fid = sd.name
+            has_report = (sd / "report.md").exists()
+            duration = None; start_time = None
+            slam_points = 0; drift_estimate = None
+            cpu_temp_max = None; anomaly_count = 0; anomalies = []
 
-                # Try to read duration/start from flight_record.json
-                duration   = None
-                start_time = None
-                fr_path    = session_dir / "flight_record.json"
-                if fr_path.exists():
-                    try:
-                        fr         = json.loads(fr_path.read_text(encoding="utf-8"))
-                        duration   = fr.get("duration_s")
-                        start_time = fr.get("arm_time_iso", "")[:19]
-                    except Exception:
-                        pass
+            fr = sd / "flight_record.json"
+            if fr.exists():
+                try:
+                    d = json.loads(fr.read_text(encoding="utf-8-sig"))
+                    duration   = d.get("duration_s")
+                    start_time = (d.get("arm_time_iso") or "")[:19]
+                except Exception:
+                    pass
 
-                flights.append({
-                    "id":         fid,
-                    "has_report": has_report,
-                    "duration":   f"{duration:.0f}s" if duration else None,
-                    "start_time": start_time,
-                })
+            bp = sd / "bag_summary.csv"
+            if bp.exists():
+                try:
+                    lines = bp.read_text(encoding="utf-8-sig").strip().splitlines()
+                    if len(lines) >= 2:
+                        h = [x.strip() for x in lines[0].split(",")]
+                        v = [x.strip() for x in lines[1].split(",")]
+                        r = dict(zip(h, v))
+                        slam_points = int(float(r.get("point_count_final", 0) or 0))
+                        raw = r.get("drift_estimate_m", "")
+                        drift_estimate = float(raw) if raw else None
+                except Exception:
+                    pass
 
-        self._json({"flights": flights, "total": len(flights)})
+            hp = sd / "health_log.csv"
+            if hp.exists():
+                try:
+                    lines = hp.read_text(encoding="utf-8-sig").strip().splitlines()
+                    if len(lines) >= 2:
+                        h = [x.strip() for x in lines[0].split(",")]
+                        temps = []
+                        for line in lines[1:]:
+                            rv = dict(zip(h, [x.strip() for x in line.split(",")]))
+                            t  = rv.get("cpu_temp_c", "")
+                            try: temps.append(float(t))
+                            except ValueError: pass
+                        cpu_temp_max = round(max(temps), 1) if temps else None
+                except Exception:
+                    pass
 
-    def _serve_report(self, session_id: str) -> None:
-        report_path = _cache_dir() / session_id / "report.md"
-        if not report_path.exists():
-            self._json({"report": None, "session_id": session_id})
-            return
+            rp = sd / "report.md"
+            if rp.exists():
+                try:
+                    in_anm = False
+                    for line in rp.read_text(encoding="utf-8").splitlines():
+                        if "## Anomalies" in line: in_anm = True; continue
+                        if in_anm and line.startswith("##"): break
+                        if in_anm and line.strip().startswith("- "):
+                            t = line.strip()[2:].strip()
+                            if t: anomalies.append(t)
+                    anomaly_count = len(anomalies)
+                except Exception:
+                    pass
 
-        report_md  = report_path.read_text(encoding="utf-8")
-        duration   = None
-        start_time = None
-        fr_path    = _cache_dir() / session_id / "flight_record.json"
-        if fr_path.exists():
+            # metadata.json — pipeline timings
+            stage_timings    = None
+            bottleneck_stage = None
+            mp = sd / "metadata.json"
+            if mp.exists():
+                try:
+                    md = json.loads(mp.read_text(encoding="utf-8-sig"))
+                    stage_timings    = md.get("stage_timings_s")
+                    bottleneck_stage = md.get("bottleneck_stage")
+                except Exception:
+                    pass
+
+            flights.append({
+                "id":              fid,
+                "has_report":      has_report,
+                "duration":        f"{duration:.0f}s" if duration else None,
+                "duration_raw":    round(duration, 1) if duration else 0,
+                "start_time":      start_time,
+                "slam_points":     slam_points,
+                "drift_estimate":  drift_estimate,
+                "cpu_temp_max":    cpu_temp_max,
+                "anomaly_count":   anomaly_count,
+                "anomalies":       anomalies,
+                "stage_timings":   stage_timings,
+                "bottleneck_stage":bottleneck_stage,
+            })
+        return flights
+
+    def _report_from_cache(self, session_id):
+        sd = _cache_dir() / session_id
+        metrics = {}; duration = None; start_time = None
+
+        fr = sd / "flight_record.json"
+        if fr.exists():
             try:
-                fr         = json.loads(fr_path.read_text(encoding="utf-8"))
-                duration   = fr.get("duration_s")
-                start_time = fr.get("arm_time_iso", "")[:19]
-            except Exception:
-                pass
+                d = json.loads(fr.read_text(encoding="utf-8-sig"))
+                duration   = d.get("duration_s")
+                start_time = (d.get("arm_time_iso") or "")[:19]
+            except Exception: pass
 
-        self._json({
+        bp = sd / "bag_summary.csv"
+        if bp.exists():
+            try:
+                lines = bp.read_text(encoding="utf-8-sig").strip().splitlines()
+                if len(lines) >= 2:
+                    h = [x.strip() for x in lines[0].split(",")]
+                    v = [x.strip() for x in lines[1].split(",")]
+                    r = dict(zip(h, v))
+                    metrics["slam_points"] = int(float(r.get("point_count_final", 0) or 0))
+                    raw = r.get("drift_estimate_m", "")
+                    if raw: metrics["drift"] = round(float(raw), 3)
+            except Exception: pass
+
+        hp = sd / "health_log.csv"
+        if hp.exists():
+            try:
+                lines = hp.read_text(encoding="utf-8-sig").strip().splitlines()
+                if len(lines) >= 2:
+                    h = [x.strip() for x in lines[0].split(",")]
+                    temps = []
+                    for line in lines[1:]:
+                        rv = dict(zip(h, [x.strip() for x in line.split(",")]))
+                        t  = rv.get("cpu_temp_c", "")
+                        try: temps.append(float(t))
+                        except ValueError: pass
+                    if temps: metrics["cpu_temp"] = round(max(temps), 1)
+            except Exception: pass
+
+        report_md = None; anomaly_count = 0
+        rp = sd / "report.md"
+        if rp.exists():
+            try:
+                report_md = rp.read_text(encoding="utf-8")
+                in_anm = False
+                for line in report_md.splitlines():
+                    if "## Anomalies" in line: in_anm = True; continue
+                    if in_anm and line.startswith("##"): break
+                    if in_anm and line.strip().startswith("- "): anomaly_count += 1
+            except Exception: pass
+        metrics["anomaly_count"] = anomaly_count
+
+        return {
             "session_id": session_id,
             "report":     report_md,
             "duration":   f"{duration:.0f}" if duration else None,
             "start_time": start_time,
-        })
+            "metrics":    metrics,
+        }
 
-    # ── Response helpers ──────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _json(self, obj: dict, status: int = 200) -> None:
+    def _json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -510,37 +389,26 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _cors(self) -> None:
+    def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
 
-    def log_message(self, fmt, *args) -> None:
+    def log_message(self, fmt, *args):
         log.debug(f"[UI] {fmt % args}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# UIServer
-# ══════════════════════════════════════════════════════════════════════════════
-
 class UIServer:
-    """
-    Local HTTP server for the dashboard UI.
+    """Local HTTP dashboard server. Call serve_forever() in a background process."""
 
-    Usage
-    -----
-        server = UIServer(port=8765)
-        server.serve_forever()   # blocks; run in a background process
-    """
-
-    def __init__(self, port: int = 8765) -> None:
+    def __init__(self, port=8765):
         self._port = port
 
-    def serve_forever(self) -> None:
+    def serve_forever(self):
         server = HTTPServer(("127.0.0.1", self._port), _DashboardHandler)
-        log.info(f"[UI] Dashboard running at http://localhost:{self._port}")
+        log.info(f"[UI] Dashboard at http://localhost:{self._port}")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
             server.server_close()
-            log.info("[UI] Dashboard server stopped.")
+            log.info("[UI] Stopped.")

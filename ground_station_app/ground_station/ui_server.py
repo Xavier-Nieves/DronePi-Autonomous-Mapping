@@ -22,6 +22,7 @@ Data sources (priority)
 import json
 import logging
 import os
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -52,7 +53,105 @@ def _get_db():
         return None
 
 
+def _sync_cache_to_db(db, cache_flights: list) -> None:
+    """
+    Upsert any cache-only sessions into the DB without running Ollama.
+
+    Called automatically from _serve_flights() and _serve_fleet_summary()
+    whenever sessions exist in the filesystem cache but are absent from
+    the database.  This closes the gap where:
+      - gen_test_flights.py writes to cache but not DB
+      - ArtifactFetcher downloads files but daemon hasn't run yet
+      - replay hasn't been triggered for some sessions
+
+    Only metrics already present in the artifact files are written.
+    has_report is set to True only when report.md already exists on disk
+    (i.e. Ollama has already run for this session).  report_md content is
+    also persisted so /api/report/ can serve it from the DB.
+
+    This function is safe to call concurrently — FlightDatabase uses WAL
+    mode and the upsert uses COALESCE so concurrent writes are harmless.
+    """
+    known = {r["session_id"] for r in db.get_all_flights()}
+    synced = 0
+    for f in cache_flights:
+        sid = f["id"]
+        if sid in known:
+            continue
+
+        # Read report.md if it exists — persist full text to DB
+        report_md = None
+        report_path = _cache_dir() / sid / "report.md"
+        if report_path.exists():
+            try:
+                report_md = report_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+        # Read battery/loop_closure data from bag_summary if available
+        loop_closures = None
+        bp = _cache_dir() / sid / "bag_summary.csv"
+        if bp.exists():
+            try:
+                lines = bp.read_text(encoding="utf-8-sig").strip().splitlines()
+                if len(lines) >= 2:
+                    h = [x.strip() for x in lines[0].split(",")]
+                    v = [x.strip() for x in lines[1].split(",")]
+                    r = dict(zip(h, v))
+                    lc = r.get("loop_closures", "")
+                    loop_closures = int(float(lc)) if lc else None
+            except Exception:
+                pass
+
+        # Read stage timings from metadata.json
+        stage_timings    = f.get("stage_timings")
+        bottleneck_stage = f.get("bottleneck_stage")
+        processing_time  = None
+        mp = _cache_dir() / sid / "metadata.json"
+        if mp.exists():
+            try:
+                md = json.loads(mp.read_text(encoding="utf-8-sig"))
+                processing_time = md.get("processing_time_s")
+                if not stage_timings:
+                    stage_timings    = md.get("stage_timings_s")
+                    bottleneck_stage = md.get("bottleneck_stage")
+            except Exception:
+                pass
+
+        try:
+            db.upsert_flight(
+                sid,
+                arm_time_iso     = f.get("start_time"),
+                duration_s       = f.get("duration_raw") or None,
+                slam_points      = f.get("slam_points")  or None,
+                drift_estimate_m = f.get("drift_estimate"),
+                loop_closures    = loop_closures,
+                cpu_temp_max_c   = f.get("cpu_temp_max"),
+                anomaly_count    = f.get("anomaly_count", 0),
+                anomalies        = f.get("anomalies", []),
+                has_report       = bool(report_md),
+                report_md        = report_md,
+            )
+            synced += 1
+        except Exception as exc:
+            log.warning(f"[Sync] Failed to upsert {sid}: {exc}")
+
+    if synced:
+        log.info(f"[Sync] Indexed {synced} cache-only session(s) into DB")
+
+
 class _DashboardHandler(BaseHTTPRequestHandler):
+
+    def do_POST(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        try:
+            if path == "/api/sync":
+                self._serve_sync()
+            else:
+                self._json({"error": "not found"}, 404)
+        except Exception as exc:
+            log.error(f"[UI] POST error: {exc}")
+            self._json({"error": str(exc)}, 500)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -71,6 +170,44 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 500)
 
     # ── Routes ────────────────────────────────────────────────────────────────
+
+    def _serve_sync(self) -> None:
+        """
+        POST /api/sync — scan the cache, upsert any sessions missing from the
+        DB, and return a summary of what was synced.
+
+        This is the backend for the Sync button in the dashboard sidebar.
+        Runs synchronously (the button shows a spinner while it runs).
+        Safe to call repeatedly — _sync_cache_to_db is idempotent.
+        """
+        db = _get_db()
+        if not db:
+            self._json({"error": "Database unavailable"}, 503); return
+
+        cache_flights = self._from_cache()
+        before        = {r["session_id"] for r in db.get_all_flights()}
+        new_sessions  = [f for f in cache_flights if f["id"] not in before]
+
+        if not new_sessions:
+            stats = db.get_stats()
+            self._json({
+                "synced":   0,
+                "total":    int(stats.get("total", 0) or 0),
+                "message":  "Database already up to date.",
+            })
+            return
+
+        _sync_cache_to_db(db, new_sessions)
+
+        after = db.get_all_flights()
+        stats = db.get_stats()
+        self._json({
+            "synced":   len(new_sessions),
+            "total":    len(after),
+            "anomalies":int(stats.get("total_anomalies", 0) or 0),
+            "message":  f"Synced {len(new_sessions)} session(s) into database.",
+            "sessions": [f["id"] for f in new_sessions],
+        })
 
     def _serve_dashboard(self):
         # dashboard.html lives next to this file — same directory
@@ -116,18 +253,44 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         })
 
     def _serve_flights(self):
-        db = _get_db()
+        """
+        Returns all flights as a unified list, DB-primary with cache fallback.
+
+        Sync contract
+        -------------
+        Every call checks for cache sessions not yet in the DB and
+        upserts them in a background thread so the DB stays current with
+        the filesystem.  This means:
+          - First call after gen_test_flights / manual cache write: serves
+            cache data immediately, syncs to DB in the background.
+          - Second call (30 s later): serves DB data with full metrics.
+          - fleet-summary, anomaly digest, get_stats() all read DB only,
+            so they become accurate within one poll cycle automatically.
+        """
+        db    = _get_db()
+        cache = self._from_cache()
+
         if db:
-            rows = db.get_all_flights()
-            if rows:
-                known   = {r["session_id"] for r in rows}
-                db_list = [self._db_to_api(r) for r in rows]
-                extras  = [f for f in self._from_cache() if f["id"] not in known]
-                result  = db_list + extras
-                self._json({"flights": result, "total": len(result), "source": "db"})
-                return
-        flights = self._from_cache()
-        self._json({"flights": flights, "total": len(flights), "source": "cache"})
+            rows    = db.get_all_flights()
+            known   = {r["session_id"] for r in rows}
+            db_list = [self._db_to_api(r) for r in rows]
+            extras  = [f for f in cache if f["id"] not in known]
+
+            # Sync any cache-only sessions into the DB in the background.
+            # Non-blocking: the HTTP response is returned immediately.
+            if extras:
+                threading.Thread(
+                    target=_sync_cache_to_db,
+                    args=(db, extras),
+                    daemon=True,
+                ).start()
+
+            result = db_list + extras
+            self._json({"flights": result, "total": len(result), "source": "db"})
+            return
+
+        # DB unavailable — serve cache directly
+        self._json({"flights": cache, "total": len(cache), "source": "cache"})
 
     def _serve_fleet_summary(self, qs=None):
         try:
@@ -136,11 +299,23 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._json({"summary": "Ollama module not available."}); return
 
         db        = _get_db()
+
+        # Ensure DB is current before reading stats — sync any cache-only
+        # sessions first so fleet summary always reflects all known flights.
+        if db:
+            cache_flights = self._from_cache()
+            known = {r["session_id"] for r in db.get_all_flights()}
+            extras = [f for f in cache_flights if f["id"] not in known]
+            if extras:
+                _sync_cache_to_db(db, extras)   # synchronous here — we need
+                                                 # fresh stats for the prompt
+
         stats     = db.get_stats() if db else {}
         anomalies = db.get_recent_anomalies(5) if db else []
 
         db_total  = int(stats.get("total", 0) or 0)
-        # JS passes ?total= with the cache count — use whichever is larger
+        # JS passes ?total= with the cache count — sanity check only;
+        # after the sync above DB total should already be correct
         js_total  = int((qs or {}).get("total", [0])[0] or 0)
         total     = max(db_total, js_total)
         reported  = int(stats.get("reported", 0) or 0)

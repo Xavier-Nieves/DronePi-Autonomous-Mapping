@@ -84,7 +84,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .chart-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
 .chart-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
-.chart-wrap{height:100px}
+.chart-wrap{height:110px}
 .lc{width:100%;height:100%}
 
 /* Anomaly digest */
@@ -121,6 +121,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .spinner::after{content:"";display:block;width:13px;height:13px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+/* ── Sync button ── */
+.sync-btn{display:flex;align-items:center;gap:5px;padding:3px 9px;border-radius:5px;background:none;border:1px solid var(--border);color:var(--muted);cursor:pointer;font-size:11px;letter-spacing:.03em;transition:all .15s;white-space:nowrap}
+.sync-btn:hover{border-color:var(--green);color:var(--green)}
+.sync-btn.running{border-color:var(--accent);color:var(--accent);cursor:default}
+.sync-btn.ok{border-color:var(--green);color:var(--green)}
+.sync-btn.err{border-color:var(--red);color:var(--red)}
+/* ── Toast notification ── */
+#toast{position:fixed;bottom:22px;right:22px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:11px 16px;font-size:12px;color:var(--text);box-shadow:0 4px 24px rgba(0,0,0,.5);opacity:0;transform:translateY(6px);transition:opacity .2s,transform .2s;pointer-events:none;z-index:999;max-width:300px}
+#toast.show{opacity:1;transform:translateY(0)}
+#toast.tok{border-color:var(--green)}
+#toast.terr{border-color:var(--red)}
 </style>
 </head>
 <body>
@@ -147,7 +158,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 <div id="body">
   <div id="sidebar">
-    <div id="sbhdr">Flights <button class="rib" onclick="loadFlights()" title="Refresh">&#8635;</button></div>
+    <div id="sbhdr">Flights <button class="sync-btn" id="syncBtn" onclick="runSync()" title="Sync cache to database">&#8645; Sync DB</button></div>
     <div id="flist"><div style="padding:14px;color:var(--muted);font-size:11px">Loading...</div></div>
   </div>
 
@@ -187,10 +198,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
         <div>
           <div class="sec">Trends &mdash; last 10 flights</div>
           <div class="chart-grid">
-            <div class="chart-card"><div class="chart-lbl">Flight Duration (s)</div><div class="chart-wrap"><svg class="lc" id="cDur"  viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
-            <div class="chart-card"><div class="chart-lbl">SLAM Points (k)</div><div class="chart-wrap"><svg class="lc" id="cPts"  viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
-            <div class="chart-card"><div class="chart-lbl">Drift (m) <span style="color:var(--yellow);font-size:9px">warn&gt;0.15 bad&gt;0.25</span></div><div class="chart-wrap"><svg class="lc" id="cDrft" viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
-            <div class="chart-card"><div class="chart-lbl">CPU Temp (&deg;C) <span style="color:var(--yellow);font-size:9px">warn&gt;65 bad&gt;75</span></div><div class="chart-wrap"><svg class="lc" id="cTemp" viewBox="0 0 300 90" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">Flight Duration (s)</div><div class="chart-wrap"><svg class="lc" id="cDur"  viewBox="0 0 340 110" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">SLAM Points (k)</div><div class="chart-wrap"><svg class="lc" id="cPts"  viewBox="0 0 340 110" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">Drift (m) <span style="color:var(--yellow);font-size:9px">warn&gt;0.15 bad&gt;0.25</span></div><div class="chart-wrap"><svg class="lc" id="cDrft" viewBox="0 0 340 110" preserveAspectRatio="none"></svg></div></div>
+            <div class="chart-card"><div class="chart-lbl">CPU Temp (&deg;C) <span style="color:var(--yellow);font-size:9px">warn&gt;65 bad&gt;75</span></div><div class="chart-wrap"><svg class="lc" id="cTemp" viewBox="0 0 340 110" preserveAspectRatio="none"></svg></div></div>
           </div>
         </div>
 
@@ -232,6 +243,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     </div>
   </div>
 </div>
+
+<div id="toast"></div>
 
 <script>
 var RPI         = '';
@@ -487,45 +500,103 @@ function drawLine(id, flights, key, scale, isBad, isWarn) {
     values.push(raw != null ? raw / scale : 0);
   }
   var n = values.length;
-  if (!n) { svg.innerHTML = '<text x="150" y="48" text-anchor="middle" fill="#8b949e" font-size="11">No data</text>'; return; }
+  if (!n) {
+    svg.innerHTML = '<text x="170" y="55" text-anchor="middle" fill="#8b949e" font-size="11">No data</text>';
+    return;
+  }
 
-  var W = 300, H = 80, PAD = 8;
+  // Layout constants — left margin reserved for Y axis labels
+  var W = 340, H = 90, LPAD = 32, RPAD = 6, TOP = 8, BOT = 16;
+  var CW = W - LPAD - RPAD;   // chart area width
+  var CH = H - TOP - BOT;     // chart area height
+
+  // Value range — pad slightly so line never clips the top/bottom edge
   var mn = values[0], mx = values[0];
-  for (var i = 1; i < n; i++) { if (values[i] < mn) mn = values[i]; if (values[i] > mx) mx = values[i]; }
+  for (var i = 1; i < n; i++) {
+    if (values[i] < mn) mn = values[i];
+    if (values[i] > mx) mx = values[i];
+  }
   var range = mx - mn || 0.001;
+  var pad   = range * 0.12;   // 12% breathing room top and bottom
+  var vMin  = mn - pad;
+  var vMax  = mx + pad;
+  var vRange = vMax - vMin;
 
-  function px(i) { return n > 1 ? (i / (n - 1)) * W : W / 2; }
-  function py(v) { return H - PAD - ((v - mn) / range) * (H - PAD * 2); }
+  // Coordinate mappers
+  function cx(i)  { return LPAD + (n > 1 ? (i / (n - 1)) * CW : CW / 2); }
+  function cy(v)  { return TOP + CH - ((v - vMin) / vRange) * CH; }
 
-  // Area fill path
-  var areaD = 'M ' + px(0).toFixed(1) + ',' + H;
-  for (var i = 0; i < n; i++) areaD += ' L ' + px(i).toFixed(1) + ',' + py(values[i]).toFixed(1);
-  areaD += ' L ' + px(n-1).toFixed(1) + ',' + H + ' Z';
+  var out = '';
 
-  // Line path
-  var lineD = 'M ' + px(0).toFixed(1) + ',' + py(values[0]).toFixed(1);
-  for (var i = 1; i < n; i++) lineD += ' L ' + px(i).toFixed(1) + ',' + py(values[i]).toFixed(1);
+  // ── Y axis grid lines (3 levels: min, mid, max) ─────────────────────────
+  var levels = [vMin + vRange * 0.05, vMin + vRange * 0.5, vMin + vRange * 0.95];
+  for (var li = 0; li < levels.length; li++) {
+    var lv  = levels[li];
+    var lyy = cy(lv).toFixed(1);
+    // Dashed horizontal grid line across chart area
+    out += '<line x1="' + LPAD + '" y1="' + lyy + '" x2="' + (W - RPAD) + '" y2="' + lyy
+        + '" stroke="#30363d" stroke-width="0.5" stroke-dasharray="3,3"/>';
+    // Y axis label
+    var ylbl = fmtAxisVal(lv, scale);
+    out += '<text x="' + (LPAD - 3) + '" y="' + (parseFloat(lyy) + 3) + '"'
+        + ' text-anchor="end" fill="#5c6b7a" font-size="7.5">' + ylbl + '</text>';
+  }
 
-  var out = '<line x1="0" y1="' + H + '" x2="' + W + '" y2="' + H + '" stroke="#30363d" stroke-width="1"/>';
-  out += '<path d="' + areaD + '" fill="rgba(88,166,255,0.07)" stroke="none"/>';
-  out += '<path d="' + lineD + '" fill="none" stroke="#58a6ff" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>';
+  // ── Baseline ─────────────────────────────────────────────────────────────
+  var baseY = TOP + CH;
+  out += '<line x1="' + LPAD + '" y1="' + baseY + '" x2="' + (W - RPAD) + '" y2="' + baseY
+      + '" stroke="#30363d" stroke-width="1"/>';
 
-  // Dots and labels
+  // ── Y axis tick line ──────────────────────────────────────────────────────
+  out += '<line x1="' + LPAD + '" y1="' + TOP + '" x2="' + LPAD + '" y2="' + baseY
+      + '" stroke="#30363d" stroke-width="0.5"/>';
+
+  // ── Area fill ─────────────────────────────────────────────────────────────
+  var areaD = 'M ' + cx(0).toFixed(1) + ',' + baseY;
+  for (var i = 0; i < n; i++) areaD += ' L ' + cx(i).toFixed(1) + ',' + cy(values[i]).toFixed(1);
+  areaD += ' L ' + cx(n - 1).toFixed(1) + ',' + baseY + ' Z';
+  out += '<path d="' + areaD + '" fill="rgba(88,166,255,0.06)" stroke="none"/>';
+
+  // ── Line ──────────────────────────────────────────────────────────────────
+  var lineD = 'M ' + cx(0).toFixed(1) + ',' + cy(values[0]).toFixed(1);
+  for (var i = 1; i < n; i++) lineD += ' L ' + cx(i).toFixed(1) + ',' + cy(values[i]).toFixed(1);
+  out += '<path d="' + lineD + '" fill="none" stroke="#58a6ff" stroke-width="1"'
+      + ' stroke-linejoin="round" stroke-linecap="round"/>';
+
+  // ── Dots + X axis labels ──────────────────────────────────────────────────
   for (var i = 0; i < n; i++) {
-    var v   = values[i];
-    var cx  = px(i).toFixed(1);
-    var cy  = py(v).toFixed(1);
+    var v    = values[i];
+    var dotX = cx(i).toFixed(1);
+    var dotY = cy(v).toFixed(1);
     var bad  = isBad  && isBad(v);
     var warn = isWarn && isWarn(v);
     var col  = bad ? '#f85149' : warn ? '#d29922' : '#58a6ff';
-    out += '<circle cx="' + cx + '" cy="' + cy + '" r="3" fill="' + col + '"/>';
+
+    // Dot — smaller (r=2) and thinner stroke
+    out += '<circle cx="' + dotX + '" cy="' + dotY + '" r="2"'
+        + ' fill="' + col + '" stroke="var(--bg)" stroke-width="0.5"/>';
+
+    // X axis value label (below baseline) — only when 10 or fewer points
     if (n <= 10) {
-      var lbl = v >= 1000 ? Math.round(v/1000) + 'k' : (v % 1 !== 0 ? v.toFixed(2) : String(Math.round(v)));
-      out += '<text x="' + cx + '" y="' + (H + 9) + '" text-anchor="middle" fill="' + col + '" font-size="8">' + lbl + '</text>';
+      var xlbl = fmtAxisVal(v, scale);
+      out += '<text x="' + dotX + '" y="' + (baseY + 9) + '"'
+          + ' text-anchor="middle" fill="' + col + '" font-size="7.5">' + xlbl + '</text>';
     }
   }
+
   svg.innerHTML = out;
 }
+
+function fmtAxisVal(v, scale) {
+  // scale is the divisor used before passing to drawLine
+  // v is already divided — multiply back to get the display unit
+  var real = v * (scale || 1);
+  if (real >= 1000000) return (real / 1000000).toFixed(1) + 'M';
+  if (real >= 1000)    return Math.round(real / 1000) + 'k';
+  if (real % 1 !== 0)  return v.toFixed(2);
+  return String(Math.round(v));
+}
+
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function mkMc(lbl, val, cls) {
@@ -562,6 +633,64 @@ function inlineFmt(s) {
   return s;
 }
 function copyRpt() { var b=document.getElementById('rBody'); if(b) navigator.clipboard.writeText(b.innerText); }
+
+// ── Sync DB ───────────────────────────────────────────────────────────────────
+function showToast(msg, type) {
+  var el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + (type || '');
+  clearTimeout(el._t);
+  el._t = setTimeout(function() { el.className = ''; }, 4000);
+}
+
+function runSync() {
+  var btn = document.getElementById('syncBtn');
+  if (btn.classList.contains('running')) return;
+  btn.classList.remove('ok', 'err');
+  btn.classList.add('running');
+  btn.innerHTML = '&#8645; Syncing...';
+
+  fetch('/api/sync', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      btn.classList.remove('running');
+      if (d.error) {
+        btn.classList.add('err');
+        btn.innerHTML = '&#9888; Error';
+        showToast('Sync failed: ' + d.error, 'terr');
+        setTimeout(function() { btn.classList.remove('err'); btn.innerHTML = '&#8645; Sync DB'; }, 3000);
+        return;
+      }
+      if (d.synced === 0) {
+        btn.classList.add('ok');
+        btn.innerHTML = '&#10003; Up to date';
+        showToast('Database up to date. ' + d.total + ' flights indexed.', 'tok');
+      } else {
+        btn.classList.add('ok');
+        btn.innerHTML = '&#10003; ' + d.synced + ' synced';
+        showToast(
+          'Synced ' + d.synced + ' session' + (d.synced !== 1 ? 's' : '') + ' into database. '
+          + d.total + ' total flights, ' + d.anomalies + ' anomalies.',
+          'tok'
+        );
+        // Refresh everything now that DB is populated
+        fleetLoaded = false;
+        loadFlights();
+        loadFleetSummary(true);
+      }
+      setTimeout(function() {
+        btn.classList.remove('ok');
+        btn.innerHTML = '&#8645; Sync DB';
+      }, 5000);
+    })
+    .catch(function(e) {
+      btn.classList.remove('running');
+      btn.classList.add('err');
+      btn.innerHTML = '&#9888; Failed';
+      showToast('Sync error: ' + String(e), 'terr');
+      setTimeout(function() { btn.classList.remove('err'); btn.innerHTML = '&#8645; Sync DB'; }, 3000);
+    });
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadStatus();

@@ -4,19 +4,17 @@ ground_station/artifact_fetcher.py — RPi artifact downloader.
 Responsibilities
 ----------------
 For a given flight session ID, fetch:
-  1. flight_record.json  — flight logger structured record
-  2. bag_summary.csv     — SLAM pipeline summary (if present)
-  3. health_log.csv      — rpi_health samples (if present)
-  4. metadata.json       — postprocess metadata (mesh vertex/face counts)
+  1. flight_record.json   — flight logger structured record
+  2. bag_summary.csv      — SLAM pipeline summary (if present)
+  3. health_log.csv       — rpi_health samples (if present)
+  4. metadata.json        — postprocess metadata (mesh vertex/face counts)
+  5. flight_samples.csv   — 2 Hz telemetry sampler: position, angular velocity,
+                            RC channels, flight mode (written by _FlightDataSampler
+                            in safe_flight_mixin.py to the rosbag session folder)
 
 Files are saved to a local cache directory and their paths returned.
 Absent files (404) are skipped silently — parsers handle missing files
 via their own defaults.
-
-ULog (.ulg) fetching is NOT implemented here. PX4 ULog files are large
-(10-100 MB) and are not currently served by serve.py. The parser is
-built and tested but will operate on stub/default data until a ULog
-serving endpoint is added to serve.py in a future phase.
 
 Cache layout
 ------------
@@ -25,13 +23,16 @@ DRONEPI_CACHE_DIR/<session_id>/
     bag_summary.csv
     health_log.csv
     metadata.json
+    flight_samples.csv
 
 References
 ----------
 - serve.py endpoints confirmed from project knowledge:
     GET /api/flights              → flight index (FlightWatcher)
     GET /rosbags/<session>/<file> → files in the rosbag session folder
-    GET /api/logs?session=<id>    → flight_events.json (not used here)
+- flight_samples.csv is written by _FlightDataSampler directly into
+  mixin._session_dir which defaults to ROSBAG_DIR/<session_tag>, so it
+  is already in the rosbag folder and served by the existing /rosbags/ route.
 - httpx streaming download:
   https://www.python-httpx.org/advanced/clients/#streaming-responses
 """
@@ -59,12 +60,15 @@ def _cache_dir() -> Path:
     ))
 
 # Artifact filenames as stored in each rosbag session folder on the RPi.
-# These match the paths written by flight_logger.py and postprocess_mesh.py.
+# flight_samples.csv is written by _FlightDataSampler in safe_flight_mixin.py
+# directly into ROSBAG_DIR/<session>/ so it is served by the existing
+# /rosbags/<session>/<file> route with no additional RPi-side changes.
 _ARTIFACTS = [
     "flight_record.json",
     "bag_summary.csv",
     "health_log.csv",
     "metadata.json",
+    "flight_samples.csv",
 ]
 
 _FETCH_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
@@ -82,14 +86,15 @@ class ArtifactFetcher:
     -----
         fetcher = ArtifactFetcher()
         paths   = fetcher.fetch("scan_20260422_143215")
-        # paths["bag_summary_csv"] → Path or None
+        # paths["flight_samples_csv"] → Path or None
 
     Return dict keys
     ----------------
-        flight_record_json  : Path | None
-        bag_summary_csv     : Path | None
-        health_log_csv      : Path | None
-        metadata_json       : Path | None
+        flight_record_json   : Path | None
+        bag_summary_csv      : Path | None
+        health_log_csv       : Path | None
+        metadata_json        : Path | None
+        flight_samples_csv   : Path | None
     """
 
     def __init__(self) -> None:
@@ -107,10 +112,11 @@ class ArtifactFetcher:
         session_cache.mkdir(parents=True, exist_ok=True)
 
         results: dict[str, Optional[Path]] = {
-            "flight_record_json": None,
-            "bag_summary_csv":    None,
-            "health_log_csv":     None,
-            "metadata_json":      None,
+            "flight_record_json":  None,
+            "bag_summary_csv":     None,
+            "health_log_csv":      None,
+            "metadata_json":       None,
+            "flight_samples_csv":  None,
         }
 
         for filename in _ARTIFACTS:
@@ -188,12 +194,13 @@ class ArtifactFetcher:
     @staticmethod
     def _filename_to_key(filename: str) -> str:
         mapping = {
-            "flight_record.json": "flight_record_json",
-            "bag_summary.csv":    "bag_summary_csv",
-            "health_log.csv":     "health_log_csv",
-            "metadata.json":      "metadata_json",
+            "flight_record.json":  "flight_record_json",
+            "bag_summary.csv":     "bag_summary_csv",
+            "health_log.csv":      "health_log_csv",
+            "metadata.json":       "metadata_json",
+            "flight_samples.csv":  "flight_samples_csv",
         }
-        return mapping.get(filename, filename.replace(".", "_"))
+        return mapping.get(filename, filename.replace(".", "_").replace("-", "_"))
 
     @staticmethod
     def _remove_partial(path: Path) -> None:

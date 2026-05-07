@@ -50,12 +50,16 @@ class PostflightIPC:
     Writes /tmp/postflight_status.json at each pipeline stage.
 
     Thread-safe via atomic file rename (write to .tmp then os.replace).
+    self.clear() is called at instantiation to remove any stale file left
+    by a previous crash or unclean shutdown, preventing led_service.py from
+    reading a stale POSTFLIGHT_RUNNING state on the next boot.
     """
 
     def __init__(self) -> None:
         self._stage  = ""
         self._failed = False
         self._done   = False
+        self.clear()   # remove stale file from previous boot/crash
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -101,9 +105,3 @@ class PostflightIPC:
             os.replace(_STATUS_FILE_TMP, _STATUS_FILE)
         except Exception as exc:
             print(f"  [PostflightIPC] Status write failed: {exc}")
-            
-    def __init__(self) -> None:
-        self._stage  = ""
-        self._failed = False
-        self._done   = False
-        self.clear()   # ← ADD: remove stale file from previous boot/crash

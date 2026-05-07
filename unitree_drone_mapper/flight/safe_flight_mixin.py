@@ -109,6 +109,8 @@ BAG_TOPICS_REQUIRED = [
     "/mavros/imu/data",
     "/mavros/rc/in",
     "/mavros/vision_pose/pose",
+    "/mavros/global_position/raw/fix",    # ← ADD: GPS NavSatFix (lat/lon/alt)
+    "/mavros/gpsstatus/gps1/raw",          # ← ADD: GPS fix_type + HDOP proxy
     "/hailo/optical_flow",
     "/hailo/ground_class",
     "/arducam/image_raw",
@@ -1051,6 +1053,7 @@ class _FlightDataSampler:
         "pos_error_m,"
         "angvel_x,angvel_y,angvel_z,angvel_mag,"
         "rc_ch1,rc_ch2,rc_ch3,rc_ch4,rc_ch7,"
+        "gps_lat,gps_lon,gps_alt,"
         "mode,armed\n"
     )
 
@@ -1063,7 +1066,11 @@ class _FlightDataSampler:
         self._act_x = self._act_y = self._act_z = 0.0
         self._wx = self._wy = self._wz = 0.0
         self._rc_channels: list = []
+        self._gps_lat:  float = 0.0          # ← ADD
+        self._gps_lon:  float = 0.0          # ← ADD
+        self._gps_alt:  float = 0.0          # ← ADD
         self._started_at = 0.0
+
 
         self._thread = threading.Thread(
             target=self._loop,
@@ -1080,7 +1087,7 @@ class _FlightDataSampler:
             from rclpy.node import Node
             from rclpy.qos  import QoSProfile, ReliabilityPolicy, HistoryPolicy
             from geometry_msgs.msg import PoseStamped
-            from sensor_msgs.msg   import Imu
+            from sensor_msgs.msg   import Imu, NavSatFix      # ← ADD NavSatFix
             from mavros_msgs.msg   import RCIn
 
             node = Node("sfm_data_sampler")
@@ -1111,6 +1118,12 @@ class _FlightDataSampler:
             def _rc_cb(msg: RCIn) -> None:
                 with self._lock:
                     self._rc_channels = list(msg.channels)
+            
+            def _gps_cb(msg: NavSatFix) -> None:
+                with self._lock:
+                    self._gps_lat = msg.latitude
+                    self._gps_lon = msg.longitude
+                    self._gps_alt = msg.altitude
 
             node.create_subscription(
                 PoseStamped, "/mavros/setpoint_position/local", _sp_cb, qos
@@ -1120,6 +1133,7 @@ class _FlightDataSampler:
             )
             node.create_subscription(Imu, "/mavros/imu/data", _imu_cb, qos)
             node.create_subscription(RCIn, "/mavros/rc/in", _rc_cb, qos)
+            node.create_subscription(NavSatFix, "/mavros/global_position/raw/fix", _gps_cb, qos)  # ← ADD GPS subscription
 
             # Write CSV header
             try:
@@ -1157,6 +1171,9 @@ class _FlightDataSampler:
                 ax, ay, az = self._act_x, self._act_y, self._act_z
                 wx, wy, wz = self._wx,    self._wy,    self._wz
                 channels   = list(self._rc_channels)
+                glat       = self._gps_lat             
+                glon       = self._gps_lon             
+                galt       = self._gps_alt             
 
             err  = ((cx-ax)**2 + (cy-ay)**2 + (cz-az)**2) ** 0.5
             wmag = (wx**2 + wy**2 + wz**2) ** 0.5
@@ -1175,6 +1192,7 @@ class _FlightDataSampler:
                 f"{err:.4f},"
                 f"{wx:.4f},{wy:.4f},{wz:.4f},{wmag:.4f},"
                 f"{ch(0)},{ch(1)},{ch(2)},{ch(3)},{ch(6)},"
+                f"{glat:.7f},{glon:.7f},{galt:.2f},"
                 f"{mode},{armed}\n"
             )
             with open(self._csv_path, "a") as f:

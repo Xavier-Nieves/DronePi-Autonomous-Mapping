@@ -54,6 +54,7 @@ PUBLIC API SUMMARY
 import argparse
 import json
 import os
+import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -166,6 +167,37 @@ def _write_session(session_id: str, record: dict) -> None:
             p.write_text(json.dumps(record, indent=2))
     except Exception as exc:
         print(f"[flight_logger] WARNING: could not write session JSON: {exc}")
+
+
+def _copy_record_to_bag(session_id: str, record: dict) -> None:
+    """
+    Copy flight_record.json into the rosbag session folder so serve.py can
+    serve it via GET /rosbags/<session>/flight_record.json.
+
+    Called from append_postprocess() — at that point all flight AND
+    postprocess fields are populated, so the laptop receives a complete
+    record in a single fetch.
+
+    Guard conditions:
+    - record["bag_path"] must be set (written by open_session or close_session)
+    - bag_path must be a real directory (not a bare session ID string from
+      the backward-compat log_flight() path)
+    - Never raises — copy failure is non-fatal and logged only
+    """
+    bag_path_str = record.get("bag_path")
+    if not bag_path_str:
+        return
+    bag_dir = Path(bag_path_str)
+    if not bag_dir.is_dir():
+        # bag_path is a bare session ID string (backward-compat path) — skip
+        return
+    src = _session_json_path(session_id)
+    dst = bag_dir / "flight_record.json"
+    try:
+        shutil.copy2(str(src), str(dst))
+        print(f"[flight_logger] flight_record.json → {dst}")
+    except Exception as exc:
+        print(f"[flight_logger] WARNING: could not copy record to bag dir: {exc}")
 
 
 def _append_history_line(line: str) -> None:
@@ -346,18 +378,23 @@ def close_session(
 
 
 def append_postprocess(
-    session_id:           str,
-    point_count:          Optional[int]   = None,
-    mesh_ok:              bool            = False,
-    mesh_faces:           Optional[int]   = None,
+    session_id:            str,
+    point_count:           Optional[int]   = None,
+    mesh_ok:               bool            = False,
+    mesh_faces:            Optional[int]   = None,
     processing_duration_s: Optional[float] = None,
-    failure_stage:        Optional[str]   = None,
-    failure_error:        Optional[str]   = None,
+    failure_stage:         Optional[str]   = None,
+    failure_error:         Optional[str]   = None,
 ) -> None:
     """
     Append post-processing results to an existing session record.
     Updates the JSON only — does NOT write another history line.
     Safe to call even if no session JSON exists (silently returns).
+
+    Also copies the completed flight_record.json to the rosbag session folder
+    so serve.py can serve it via GET /rosbags/<session>/flight_record.json.
+    This is the only copy point — it fires after all fields are populated so
+    the laptop always receives a complete record in a single fetch.
 
     Called by postprocess_mesh.py after processing completes or fails.
     """
@@ -383,6 +420,11 @@ def append_postprocess(
     status = "success" if not failure_stage else f"FAILED at {failure_stage}"
     print(f"[flight_logger] Flight {record.get('flight_number', '?'):03d} "
           f"postprocess appended — {status}")
+
+    # Copy completed record to rosbag folder for serve.py / ArtifactFetcher.
+    # Done here — after all fields written — so the laptop receives one
+    # complete file rather than a partial record.
+    _copy_record_to_bag(session_id, record)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -513,10 +555,8 @@ def get_summary() -> dict:
         return {"total": 0}
 
     by_type: dict = {}
-    end_reasons:  dict = {}
     for line in lines:
         parts = {p.strip() for p in line.split("|")}
-        # Count by flight type
         for ftype in (FLIGHT_TYPE_TEST, FLIGHT_TYPE_AUTONOMUS,
                       FLIGHT_TYPE_MANUAL, FLIGHT_TYPE_UNKNOWN):
             if ftype in parts:
@@ -550,43 +590,43 @@ def _cli_print(lines: list) -> None:
         print(line)
 
 
-def main() -> None:
+def _cli() -> None:
     parser = argparse.ArgumentParser(
-        description="DronePi flight history viewer"
+        description="DronePi flight logger — read flight history."
     )
-    parser.add_argument("--last",     type=int,  help="Show last N flights")
-    parser.add_argument("--summary",  action="store_true", help="Summary statistics")
-    parser.add_argument("--failures", action="store_true", help="Show failed flights only")
-    parser.add_argument("--session",  type=str,  help="Show full JSON for a session ID")
-    parser.add_argument("--sessions", action="store_true", help="List all session IDs")
+    sub = parser.add_subparsers(dest="cmd")
+
+    p_hist = sub.add_parser("history", help="Print flight history log")
+    p_hist.add_argument("--last", type=int, default=None,
+                        help="Show last N flights only")
+
+    p_sum  = sub.add_parser("summary", help="Print flight summary counts")
+    p_sess = sub.add_parser("sessions", help="List all session IDs")
+
+    p_show = sub.add_parser("show", help="Show structured record for a session")
+    p_show.add_argument("session_id")
+
     args = parser.parse_args()
 
-    if args.session:
-        record = read_session_record(args.session)
-        if record:
-            print(json.dumps(record, indent=2))
-        else:
-            print(f"No record found for session: {args.session}")
-        return
-
-    if args.sessions:
-        for s in list_sessions():
-            print(s)
-        return
-
-    if args.summary:
+    if args.cmd == "history":
+        _cli_print(read_history(args.last))
+    elif args.cmd == "summary":
         s = get_summary()
-        print(f"Total flights: {s['total']}")
-        for ftype, count in s.get("by_type", {}).items():
-            print(f"  {ftype}: {count}")
-        return
-
-    lines = read_history(last_n=args.last)
-    if args.failures:
-        lines = [l for l in lines if "FAIL" in l or "CRASH" in l
-                 or "RC_KILL" in l or "OVERRIDE" in l or "WATCHDOG" in l]
-    _cli_print(lines)
+        print(f"Total flights : {s['total']}")
+        for k, v in s.get("by_type", {}).items():
+            print(f"  {k:<12s}: {v}")
+    elif args.cmd == "sessions":
+        for sid in list_sessions():
+            print(sid)
+    elif args.cmd == "show":
+        r = read_session_record(args.session_id)
+        if r:
+            print(json.dumps(r, indent=2))
+        else:
+            print(f"No record found for session '{args.session_id}'")
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
-    main()
+    _cli()

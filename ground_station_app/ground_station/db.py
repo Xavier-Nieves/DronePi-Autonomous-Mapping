@@ -17,6 +17,19 @@ Migration path (future)
 
 Current state: local SQLite only at ~/.dronepi-ground/dronepi.db
 
+Schema changes (this version)
+------------------------------
+Added columns:
+  flight_type       TEXT  — TEST / AUTONOMOUS / MANUAL_SCAN / UNKNOWN
+  script_name       TEXT  — basename of calling flight script
+  end_reason        TEXT  — how the flight ended (RC_KILL_SWITCH, AUTO.LAND, …)
+  stage_timings_s   TEXT  — JSON dict of per-stage wall-clock times
+  bottleneck_stage  TEXT  — name of slowest pipeline stage
+
+Existing DBs are migrated automatically via _migrate_db() which runs
+ALTER TABLE ADD COLUMN for each new column. ALTER TABLE is idempotent
+when wrapped in try/except (column already exists → silently ignored).
+
 Usage
 -----
     db = FlightDatabase()
@@ -62,6 +75,10 @@ CREATE TABLE IF NOT EXISTS flights (
     duration_s          REAL,
     end_reason          TEXT,
 
+    -- Flight identity
+    flight_type         TEXT,   -- TEST / AUTONOMOUS / MANUAL_SCAN / UNKNOWN
+    script_name         TEXT,   -- basename of calling script
+
     -- SLAM
     slam_points         INTEGER,
     drift_estimate_m    REAL,
@@ -81,6 +98,10 @@ CREATE TABLE IF NOT EXISTS flights (
     vertex_count        INTEGER,
     face_count          INTEGER,
 
+    -- Pipeline performance
+    stage_timings_s     TEXT,   -- JSON dict: {"BagReader": 7.8, "MLSSmoother": 14.2, ...}
+    bottleneck_stage    TEXT,   -- name of slowest stage
+
     -- Anomalies
     anomaly_count       INTEGER,
     anomalies_json      TEXT,   -- JSON array of strings
@@ -97,6 +118,15 @@ CREATE TABLE IF NOT EXISTS flights (
 CREATE INDEX IF NOT EXISTS idx_flights_arm_time
     ON flights (arm_time_iso DESC);
 """
+
+# Columns added after the initial schema — applied via ALTER TABLE on existing DBs.
+# Tuples of (column_name, column_definition).
+_MIGRATION_COLUMNS = [
+    ("flight_type",      "TEXT"),
+    ("script_name",      "TEXT"),
+    ("stage_timings_s",  "TEXT"),
+    ("bottleneck_stage", "TEXT"),
+]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,9 +153,29 @@ class FlightDatabase:
         try:
             with self._connect() as conn:
                 conn.executescript(_DDL)
+            self._migrate_db()
             log.info(f"[DB] Initialised at {self._path}")
         except Exception as exc:
             log.error(f"[DB] Init failed: {exc}")
+
+    def _migrate_db(self) -> None:
+        """
+        Add any columns that were not present in the original schema.
+        ALTER TABLE ADD COLUMN is safe to run repeatedly — columns that
+        already exist raise OperationalError which is silently ignored.
+        """
+        for col_name, col_def in _MIGRATION_COLUMNS:
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        f"ALTER TABLE flights ADD COLUMN {col_name} {col_def}"
+                    )
+                log.info(f"[DB] Migrated: added column '{col_name}'")
+            except sqlite3.OperationalError:
+                # Column already exists — expected on all runs after first migration
+                pass
+            except Exception as exc:
+                log.warning(f"[DB] Migration warning for '{col_name}': {exc}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._path), timeout=10)
@@ -143,6 +193,8 @@ class FlightDatabase:
         arm_time_iso:      Optional[str]   = None,
         duration_s:        Optional[float] = None,
         end_reason:        Optional[str]   = None,
+        flight_type:       Optional[str]   = None,
+        script_name:       Optional[str]   = None,
         slam_points:       Optional[int]   = None,
         drift_estimate_m:  Optional[float] = None,
         loop_closures:     Optional[int]   = None,
@@ -154,6 +206,8 @@ class FlightDatabase:
         battery_min_v:     Optional[float] = None,
         vertex_count:      Optional[int]   = None,
         face_count:        Optional[int]   = None,
+        stage_timings_s:   Optional[dict]  = None,
+        bottleneck_stage:  Optional[str]   = None,
         anomaly_count:     Optional[int]   = None,
         anomalies:         Optional[list]  = None,
         has_report:        bool            = False,
@@ -163,29 +217,35 @@ class FlightDatabase:
         Insert or update a flight record.
 
         On conflict (same session_id) updates all provided fields and
-        always refreshes updated_at. Fields not passed remain unchanged.
+        always refreshes updated_at. Fields not passed remain unchanged
+        (COALESCE pattern — NULL inputs never overwrite existing values).
 
         Returns True on success, False on error.
         """
-        now = datetime.now(timezone.utc).isoformat()
-        anomalies_json = json.dumps(anomalies or [])
+        now             = datetime.now(timezone.utc).isoformat()
+        anomalies_json  = json.dumps(anomalies or [])
+        timings_json    = json.dumps(stage_timings_s) if stage_timings_s else None
 
         sql = """
         INSERT INTO flights (
             session_id, arm_time_iso, duration_s, end_reason,
+            flight_type, script_name,
             slam_points, drift_estimate_m, loop_closures,
             cpu_temp_max_c, throttling_events, memory_peak_pct,
             battery_start_v, battery_end_v, battery_min_v,
             vertex_count, face_count,
+            stage_timings_s, bottleneck_stage,
             anomaly_count, anomalies_json,
             has_report, report_md,
             created_at, updated_at
         ) VALUES (
             :session_id, :arm_time_iso, :duration_s, :end_reason,
+            :flight_type, :script_name,
             :slam_points, :drift_estimate_m, :loop_closures,
             :cpu_temp_max_c, :throttling_events, :memory_peak_pct,
             :battery_start_v, :battery_end_v, :battery_min_v,
             :vertex_count, :face_count,
+            :stage_timings_s, :bottleneck_stage,
             :anomaly_count, :anomalies_json,
             :has_report, :report_md,
             :now, :now
@@ -194,6 +254,8 @@ class FlightDatabase:
             arm_time_iso      = COALESCE(:arm_time_iso,      arm_time_iso),
             duration_s        = COALESCE(:duration_s,        duration_s),
             end_reason        = COALESCE(:end_reason,        end_reason),
+            flight_type       = COALESCE(:flight_type,       flight_type),
+            script_name       = COALESCE(:script_name,       script_name),
             slam_points       = COALESCE(:slam_points,       slam_points),
             drift_estimate_m  = COALESCE(:drift_estimate_m,  drift_estimate_m),
             loop_closures     = COALESCE(:loop_closures,     loop_closures),
@@ -205,6 +267,8 @@ class FlightDatabase:
             battery_min_v     = COALESCE(:battery_min_v,     battery_min_v),
             vertex_count      = COALESCE(:vertex_count,      vertex_count),
             face_count        = COALESCE(:face_count,        face_count),
+            stage_timings_s   = COALESCE(:stage_timings_s,   stage_timings_s),
+            bottleneck_stage  = COALESCE(:bottleneck_stage,  bottleneck_stage),
             anomaly_count     = COALESCE(:anomaly_count,     anomaly_count),
             anomalies_json    = COALESCE(:anomalies_json,    anomalies_json),
             has_report        = MAX(has_report, :has_report),
@@ -218,6 +282,8 @@ class FlightDatabase:
                     "arm_time_iso":     arm_time_iso,
                     "duration_s":       duration_s,
                     "end_reason":       end_reason,
+                    "flight_type":      flight_type,
+                    "script_name":      script_name,
                     "slam_points":      slam_points,
                     "drift_estimate_m": drift_estimate_m,
                     "loop_closures":    loop_closures,
@@ -229,6 +295,8 @@ class FlightDatabase:
                     "battery_min_v":    battery_min_v,
                     "vertex_count":     vertex_count,
                     "face_count":       face_count,
+                    "stage_timings_s":  timings_json,
+                    "bottleneck_stage": bottleneck_stage,
                     "anomaly_count":    anomaly_count,
                     "anomalies_json":   anomalies_json,
                     "has_report":       int(has_report),
@@ -244,11 +312,7 @@ class FlightDatabase:
     # ── Read ──────────────────────────────────────────────────────────────────
 
     def get_all_flights(self, limit: int = 200) -> list[dict]:
-        """
-        Return all flights ordered newest first, up to `limit`.
-
-        Returns empty list on error.
-        """
+        """Return all flights ordered newest first, up to `limit`."""
         try:
             with self._connect() as conn:
                 rows = conn.execute(
@@ -261,9 +325,7 @@ class FlightDatabase:
             return []
 
     def get_flight(self, session_id: str) -> Optional[dict]:
-        """
-        Return a single flight record or None if not found.
-        """
+        """Return a single flight record or None if not found."""
         try:
             with self._connect() as conn:
                 row = conn.execute(
@@ -305,11 +367,7 @@ class FlightDatabase:
             return {}
 
     def get_recent_anomalies(self, limit: int = 10) -> list[dict]:
-        """
-        Return the most recent anomaly entries across all flights.
-
-        Returns list of dicts: {session_id, arm_time_iso, text}
-        """
+        """Return the most recent anomaly entries across all flights."""
         try:
             with self._connect() as conn:
                 rows = conn.execute("""
@@ -342,8 +400,6 @@ class FlightDatabase:
 
         Supported metrics: duration_s, slam_points, drift_estimate_m,
                            cpu_temp_max_c, battery_min_v, anomaly_count
-
-        Returns list of {session_id, arm_time_iso, value}
         """
         allowed = {
             "duration_s", "slam_points", "drift_estimate_m",
@@ -360,7 +416,6 @@ class FlightDatabase:
                     ORDER BY arm_time_iso DESC, session_id DESC
                     LIMIT ?
                 """, (limit,)).fetchall()
-            # Return oldest first for chart display
             return list(reversed([dict(r) for r in rows]))
         except Exception as exc:
             log.error(f"[DB] get_trend_series failed: {exc}")
@@ -371,9 +426,15 @@ class FlightDatabase:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
+        # Deserialise JSON blobs
         try:
             d["anomalies"] = json.loads(d.get("anomalies_json") or "[]")
         except Exception:
             d["anomalies"] = []
+        try:
+            raw_timings = d.get("stage_timings_s")
+            d["stage_timings"] = json.loads(raw_timings) if raw_timings else {}
+        except Exception:
+            d["stage_timings"] = {}
         d["has_report"] = bool(d.get("has_report", 0))
         return d

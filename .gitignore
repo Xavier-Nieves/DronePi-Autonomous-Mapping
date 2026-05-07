@@ -18,6 +18,10 @@ data/my_scan/
 # IDE
 .vscode/
 .idea/
+.claude/
+
+# GitHub / CI (not tracked in this repo)
+.github/
 *.swp
 *.swo
 *~

@@ -10,7 +10,7 @@
 #
 # After running:
 #   - Hotspot SSID : dronepi-ap
-#   - Password     : dronepi123
+#   - Password     : set via DRONEPI_HOTSPOT_PASSWORD env var or prompted at runtime
 #   - Pi IP        : 10.42.0.1
 #   - SSH from laptop: ssh dronepi@10.42.0.1
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18,7 +18,12 @@
 set -e
 
 SSID="dronepi-ap"
-PASSWORD="dronepi123"
+if [ -z "$DRONEPI_HOTSPOT_PASSWORD" ]; then
+  read -rsp "Enter hotspot password (min 8 chars): " PASSWORD
+  echo
+else
+  PASSWORD="$DRONEPI_HOTSPOT_PASSWORD"
+fi
 IFACE="wlan0"
 SERVICE="dronepi-hotspot"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

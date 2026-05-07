@@ -627,7 +627,7 @@ Set in QGroundControl before first flight. Full parameter file at
 |---|---|---|
 | `mavros` | FCU bridge (MAVLink ↔ ROS 2) | — |
 | `drone-watchdog` | Flight stack supervisor | — |
-| `dronepi-hotspot` | Wi-Fi AP (SSID: dronepi-ap, pw: dronepi123) | — |
+| `dronepi-hotspot` | Wi-Fi AP (SSID: dronepi-ap, pw: set at setup time) | — |
 | `drone-mesh-server` | HTTP server + camera stream proxy | 8080 |
 | `foxglove-bridge` | ROS 2 WebSocket bridge | 8765 |
 | `rpi-health` | System health topic publisher | — |

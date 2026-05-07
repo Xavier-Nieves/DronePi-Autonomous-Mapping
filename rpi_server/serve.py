@@ -405,7 +405,10 @@ class CORSHandler(SimpleHTTPRequestHandler):
 
         Returns 200 on success, 400/401/403/500 on error.
         """
-        UPLOAD_TOKEN = os.environ.get("DRONEPI_UPLOAD_TOKEN", "dronepi")
+        UPLOAD_TOKEN = os.environ.get("DRONEPI_UPLOAD_TOKEN")
+        if not UPLOAD_TOKEN:
+            logging.warning("DRONEPI_UPLOAD_TOKEN not set — using insecure default. Set this env var in production.")
+            UPLOAD_TOKEN = "dronepi"
 
         # ── Auth ──────────────────────────────────────────────────────────────
         auth = self.headers.get("Authorization", "")

@@ -268,7 +268,7 @@ and enters the failsafe behavior defined by `COM_OBL_ACT`.
 2. Power on RC transmitter
 3. Connect battery
 4. Wait ~30s for Pi to boot and all services to start
-5. Connect to dronepi-ap Wi-Fi on laptop (password: dronepi123)
+5. Connect to dronepi-ap Wi-Fi on laptop (password: set during hotspot setup — see setup_scripts/setup_hotspot_service.sh)
 6. Open QGroundControl — confirm vehicle appears and FCU connected
 7. Open Foxglove Studio — connect to ws://10.42.0.1:8765
 8. Wait for DronePi RGB LED to show solid green (READY)

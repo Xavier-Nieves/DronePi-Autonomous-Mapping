@@ -19,9 +19,13 @@ data/my_scan/
 .vscode/
 .idea/
 .claude/
+*.code-workspace
 
 # GitHub / CI (not tracked in this repo)
 .github/
+
+# Runtime logs and flight session data
+logs/
 *.swp
 *.swo
 *~

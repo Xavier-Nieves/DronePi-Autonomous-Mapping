@@ -13,12 +13,12 @@
 #   [4]  Unitree L1 LiDAR driver + colcon symlink fix
 #   [5]  Point-LIO SLAM
 #   [6]  Miniforge (Conda) + dronepi environment + all Python deps
-#   [7]  udev rules (ttyPixhawk, ttyUSB0, Hailo group)
+#   [7]  udev rules (ttyPixhawk, ttyUSB0, Hailo group, gpio group)
 #   [8]  Build ROS 2 workspace
 #   [9]  CPU governor → performance
 #   [10] Systemd services (hotspot, mesh-server, foxglove, mavros,
 #         drone-watchdog, dronepi-main, pointlio-standby,
-#         slam-bridge, rpi-health)
+#         slam-bridge, rpi-health, led, camera-stream, meshview-telemetry)
 #
 # Run as root (sudo). The script will not proceed without it.
 # Re-running is safe — each step checks before acting.
@@ -331,6 +331,8 @@ udevadm trigger
 usermod -aG dialout "$DRONEPI_USER"
 groupadd -f hailo
 usermod -aG hailo "$DRONEPI_USER"
+groupadd -f gpio
+usermod -aG gpio "$DRONEPI_USER"
 
 ok "udev rules written and reloaded"
 
@@ -418,10 +420,11 @@ install_service() {
     fi
 }
 
-install_service "pointlio-standby" "$FLIGHT_DIR/pointlio-standby.service"
-install_service "slam-bridge"      "$FLIGHT_DIR/slam-bridge.service"
+install_service "pointlio-standby"    "$FLIGHT_DIR/pointlio-standby.service"
+install_service "slam-bridge"         "$FLIGHT_DIR/slam-bridge.service"
+install_service "led"                 "$FLIGHT_DIR/led.service"
 
-# ── rpi-health: copy service file and set script permissions ──────────────────
+# ── rpi_server service files + script permissions ─────────────────────────────
 RPI_HEALTH_SERVICE="$RPI_SERVER_DIR/rpi-health.service"
 if [[ -f "$RPI_HEALTH_SERVICE" ]]; then
     cp "$RPI_HEALTH_SERVICE" "/etc/systemd/system/rpi-health.service"
@@ -431,6 +434,9 @@ if [[ -f "$RPI_HEALTH_SERVICE" ]]; then
 else
     warn "rpi-health.service not found at $RPI_HEALTH_SERVICE — skipping"
 fi
+
+install_service "camera-stream"       "$RPI_SERVER_DIR/camera-stream.service"
+install_service "meshview-telemetry"  "$RPI_SERVER_DIR/meshview-telemetry.service"
 
 # ── Reload daemon and enable all services ─────────────────────────────────────
 systemctl daemon-reload
@@ -443,7 +449,10 @@ for svc in \
     drone-watchdog \
     dronepi-main \
     slam-bridge \
-    rpi-health; do
+    rpi-health \
+    led \
+    camera-stream \
+    meshview-telemetry; do
     if systemctl list-unit-files "${svc}.service" &>/dev/null; then
         systemctl enable "${svc}.service" 2>/dev/null || true
     fi
@@ -475,7 +484,8 @@ echo "  5. Reboot for services:      sudo reboot"
 echo ""
 echo "  After reboot, verify all services:"
 echo "    sudo systemctl status mavros drone-watchdog slam-bridge \\"
-echo "      pointlio-standby foxglove-bridge drone-mesh-server rpi-health"
+echo "      pointlio-standby foxglove-bridge drone-mesh-server rpi-health \\"
+echo "      led camera-stream meshview-telemetry"
 echo ""
 echo "  If SSD not yet configured:"
 echo "    sudo blkid | grep -i ssd"

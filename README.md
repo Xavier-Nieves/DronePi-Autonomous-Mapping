@@ -69,6 +69,7 @@ and ortho map auto-load in browser within seconds of disarm.
 │              └───────────────────────────────────────────┘                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+<img width="1536" height="1024" alt="WhatsApp Image 2026-05-06 at 9 08 14 AM" src="https://github.com/user-attachments/assets/1e30d56e-3764-4031-b3a5-67a6396a96f6" />
 
 ---
 

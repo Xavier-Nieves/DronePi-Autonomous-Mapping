@@ -30,7 +30,7 @@ and ortho map auto-load in browser within seconds of disarm.
 │                          DRONEPI SYSTEM OVERVIEW                             │
 │                                                                              │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────────────┐   │
-│  │  Pixhawk 6X  │    │ Unitree L1   │    │ IMX477 Camera  + Hailo-8L   │   │
+│  │  Pixhawk 6X  │    │ Unitree L1   │    │ IMX477 Camera  + Hailo-8L    │   │
 │  │  Flight Ctrl │    │  LiDAR 360°  │    │ imagery + AI inference       │   │
 │  └──────┬───────┘    └──────┬───────┘    └──────────────┬───────────────┘   │
 │         │ MAVLink           │ USB Serial                │ CSI / PCIe        │
@@ -38,34 +38,34 @@ and ortho map auto-load in browser within seconds of disarm.
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                    Raspberry Pi 5 (16 GB, Ubuntu 24.04)              │   │
 │  │                                                                      │   │
-│  │  MAVROS ──► PX4 EKF2 ◄── Point-LIO SLAM ◄── Unitree L1             │   │
-│  │                 ▲               ▲                                   │   │
+│  │  MAVROS ──► PX4 EKF2 ◄── Point-LIO SLAM ◄── Unitree L1               │   │
+│  │                 ▲               ▲                                    │   │
 │  │           SLAM Bridge    Collision Monitor                           │   │
 │  │                                                                      │   │
-│  │  ┌──────────────────────────────────────────────────────────────┐   │   │
-│  │  │         Flight Stack  (main.py  +  drone_watchdog.py)        │   │   │
-│  │  │   rosbag ──► Point-LIO ──► SLAM Bridge ──► OFFBOARD mission  │   │   │
-│  │  └────────────────────────────────┬─────────────────────────────┘   │   │
+│  │  ┌──────────────────────────────────────────────────────────────┐    │   │
+│  │  │         Flight Stack  (main.py  +  drone_watchdog.py)        │    │   │
+│  │  │   rosbag ──► Point-LIO ──► SLAM Bridge ──► OFFBOARD mission  │    │   │
+│  │  └────────────────────────────────┬─────────────────────────────┘    │   │
 │  │                                   │ on disarm (parallel)             │   │
-│  │         ┌─────────────────────────┴──────────────────────────┐      │   │
+│  │         ┌─────────────────────────┴──────────────────────────┐       │   │
 │  │         ▼                                                     ▼      │   │
-│  │  ┌─────────────────────────────┐   ┌────────────────────────────┐   │   │
-│  │  │   Mesh Pipeline  (7 stages) │   │  Ortho Pipeline  (5 stages)│   │   │
-│  │  │  .mcap → cloud → smooth →   │   │  frames → filter → stitch  │   │   │
-│  │  │  classify → DTM → DSM →     │   │  → tile pyramid → publish  │   │   │
-│  │  │  texture → mesh_final.ply   │   │  → ortho_metadata.json     │   │   │
-│  │  └──────────────┬──────────────┘   └───────────┬────────────────┘   │   │
-│  │                 └─────────────┬────────────────┘                    │   │
-│  │                               ▼                                     │   │
-│  │                    serve.py  (HTTP :8080)                           │   │
+│  │  ┌─────────────────────────────┐   ┌────────────────────────────┐    │   │
+│  │  │   Mesh Pipeline  (7 stages) │   │  Ortho Pipeline  (5 stages)│    │   │
+│  │  │  .mcap → cloud → smooth →   │   │  frames → filter → stitch  │    │   │
+│  │  │  classify → DTM → DSM →     │   │  → tile pyramid → publish  │    │   │
+│  │  │  texture → mesh_final.ply   │   │  → ortho_metadata.json     │    │   │
+│  │  └──────────────┬──────────────┘   └───────────┬────────────────┘    │   │
+│  │                 └─────────────┬────────────────┘                     │   │
+│  │                               ▼                                      │   │
+│  │                    serve.py  (HTTP :8080)                            │   │
 │  └───────────────────────────────┬──────────────────────────────────────┘   │
 │                                  │ Wi-Fi hotspot (dronepi-ap)               │
 │              ┌───────────────────▼───────────────────────┐                  │
-│              │           meshview.html                    │                  │
-│              │  3D tab  ─  textured_mesh.ply  (Three.js)  │                  │
-│              │  Ortho tab ─  tile map  (Leaflet XYZ)       │                  │
-│              │  Live tab  ─  camera stream + telemetry     │                  │
-│              │  http://10.42.0.1:8080/meshview.html        │                  │
+│              │           meshview.html                   │                  │
+│              │  3D tab  ─  textured_mesh.ply  (Three.js) │                  │
+│              │  Ortho tab ─  tile map  (Leaflet XYZ)     │                  │
+│              │  Live tab  ─  camera stream + telemetry   │                  │
+│              │  http://10.42.0.1:8080/meshview.html      │                  │
 │              └───────────────────────────────────────────┘                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
